@@ -10,8 +10,8 @@
 ;;;   Прямое создание объекта MLEADERSTYLE через entmake ненадёжно
 ;;;   (обязательные внутренние DXF-группы недокументированы и
 ;;;   различаются между версиями AutoCAD). Поэтому стиль
-;;;   импортируется из отдельного чертежа-шаблона (++РАМКА++.dwg)
-;;;   путём вставки его как временного блока — при этом AutoCAD
+;;;   импортируется из отдельного чертежа-шаблона (style_template.dwg)
+;;;   путём вставки его как временного блока — AutoCAD при этом
 ;;;   автоматически копирует все использованные в шаблоне стили
 ;;;   в текущий чертёж. Временный блок сразу удаляется.
 ;;;
@@ -20,6 +20,11 @@
 ;;;   принудительно назначая все нужные параметры оформления
 ;;;   (без стрелки, горизонтальная полка, текстовый стиль «Д-431»,
 ;;;   маска фона) напрямую каждому созданному объекту.
+;;;
+;;; Экспорт таблицы координат:
+;;;   После построения выносок скрипт предлагает экспортировать
+;;;   таблицу координат в CSV (Excel) и/или RTF (Word) без
+;;;   использования COM-автоматизации Office.
 ;;; ============================================================
 
 
@@ -91,7 +96,7 @@
 ;;; в текущий чертёж. После вставки временный блок удаляется.
 ;;;
 ;;; Аргументы:
-;;;   template-path — полный путь к файлу ++РАМКА++.dwg
+;;;   template-path — полный путь к файлу style_template.dwg
 ;;;   mleader-style — ожидаемое имя стиля мультивыноски
 ;;;
 ;;; Возвращает T, если стиль есть в чертеже (был или появился),
@@ -109,7 +114,7 @@
     (if (not (findfile template-path))
       (progn
         (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: файл шаблона не найден: " template-path))
-        (princ "\n  Создайте ++РАМКА++.dwg с настроенным стилем «Координаты»")
+        (princ "\n  Создайте style_template.dwg с настроенным стилем «Координаты»")
         (princ "\n  (см. инструкцию) и укажите верный путь в переменной template-path.")
         nil
       )
@@ -325,110 +330,397 @@
   )
 )
 
-;;; ВСТАВИТЬ ЭТО В КОНЕЦ ФАЙЛА (перед командой c:VERTEXLEADERS)
-;;; Функция экспорта списка вершин в CSV-файл
-(defun vl:export-to-csv (vertices file-path / f idx pt)
-  (setq f (open file-path "w"))
-  (if f
+
+;;; ------------------------------------------------------------
+;;; Экспортирует таблицу координат в CSV-файл (открывается в Excel).
+;;; Разделитель ";" — корректно распознаётся Excel с русской
+;;; локалью (где "," используется как десятичный разделитель).
+;;;
+;;; Аргумент data-list — список записей вида (idx x-str y-str)
+;;; ------------------------------------------------------------
+(defun vl:export-csv (data-list csv-path / f row)
+  (setq f (open csv-path "w"))
+  (if (null f)
     (progn
-      (write-line "Номер вершины;X;Y" f) ; Заголовки столбцов
-      (setq idx 1)
-      (foreach pt vertices
-        (write-line 
-          (strcat (itoa idx) ";" 
-                  (rtos (car pt) 2 4) ";" 
-                  (rtos (cadr pt) 2 4)) 
+      (princ (strcat "\n  ОШИБКА: не удалось создать файл " csv-path))
+      nil
+    )
+    (progn
+      ;; Заголовок таблицы
+      (write-line "№;X;Y" f)
+      ;; Строки данных
+      (foreach row data-list
+        (write-line
+          (strcat (itoa (car row)) ";" (cadr row) ";" (caddr row))
           f
         )
-        (setq idx (1+ idx))
       )
       (close f)
-      (princ (strcat "\n Данные успешно экспортированы в: " file-path))
+      (princ (strcat "\n  Файл CSV сохранён: " csv-path))
+      T
     )
-    (princ "\n ОШИБКА: Не удалось открыть файл для записи.")
   )
 )
 
+
+;;; ------------------------------------------------------------
+;;; Экспортирует таблицу координат в RTF-файл с настоящей таблицей
+;;; (открывается в Word как готовый форматированный документ,
+;;; без необходимости COM-автоматизации Word).
+;;;
+;;; Аргумент data-list — список записей вида (idx x-str y-str)
+;;; ------------------------------------------------------------
+(defun vl:export-rtf (data-list rtf-path / f row col1 col2 col3 row-def)
+  (setq f (open rtf-path "w"))
+  (if (null f)
+    (progn
+      (princ (strcat "\n  ОШИБКА: не удалось создать файл " rtf-path))
+      nil
+    )
+    (progn
+      ;; Границы столбцов таблицы (в твипах: 1 см ? 567 твипов)
+      (setq col1 1200)  ; ширина столбца "№"
+      (setq col2 3600)  ; ширина столбца "X"
+      (setq col3 6000)  ; ширина столбца "Y"
+
+      ;; Определение строки таблицы (границы всех ячеек)
+      (setq row-def
+        (strcat
+          "\\trowd\\trgaph108\\trleft0"
+          "\\clbrdrt\\brdrs\\brdrw10\\clbrdrl\\brdrs\\brdrw10"
+          "\\clbrdrb\\brdrs\\brdrw10\\clbrdrr\\brdrs\\brdrw10\\cellx" (itoa col1)
+          "\\clbrdrt\\brdrs\\brdrw10\\clbrdrl\\brdrs\\brdrw10"
+          "\\clbrdrb\\brdrs\\brdrw10\\clbrdrr\\brdrs\\brdrw10\\cellx" (itoa col2)
+          "\\clbrdrt\\brdrs\\brdrw10\\clbrdrl\\brdrs\\brdrw10"
+          "\\clbrdrb\\brdrs\\brdrw10\\clbrdrr\\brdrs\\brdrw10\\cellx" (itoa col3)
+        )
+      )
+
+      ;; --- Заголовок RTF-документа ---
+      (write-line "{\\rtf1\\ansi\\ansicpg1251\\deff0" f)
+      (write-line "{\\fonttbl{\\f0 Arial;}}" f)
+      (write-line "\\f0\\fs24" f)
+      (write-line "{\\b Таблица координат вершин полилинии}\\par\\par" f)
+
+      ;; --- Заголовочная строка таблицы ---
+      (write-line row-def f)
+      (write-line "\\intbl\\qc\\b №\\cell\\qc X\\cell\\qc Y\\cell\\row\\b0" f)
+
+      ;; --- Строки данных ---
+      (foreach row data-list
+        (write-line row-def f)
+        (write-line
+          (strcat
+            "\\intbl\\qc " (itoa (car row)) "\\cell"
+            "\\qc " (cadr row) "\\cell"
+            "\\qc " (caddr row) "\\cell\\row"
+          )
+          f
+        )
+      )
+
+      ;; --- Закрытие RTF-документа ---
+      (write-line "}" f)
+      (close f)
+      (princ (strcat "\n  Файл RTF (Word) сохранён: " rtf-path))
+      T
+    )
+  )
+)
+
+
+;;; ------------------------------------------------------------
+;;; Запрашивает у пользователя, нужно ли экспортировать таблицу
+;;; координат, и в каком формате (Excel / Word / Оба / Нет).
+;;; При положительном ответе запрашивает путь для сохранения
+;;; через стандартный диалог и вызывает соответствующий экспорт.
+;;;
+;;; Аргумент data-list — список записей вида (idx x-str y-str)
+;;; ------------------------------------------------------------
+(defun vl:offer-export (data-list / choice base-path)
+  (initget "Excel Word Оба Нет")
+  (setq choice
+    (getkword
+      "\nЭкспортировать таблицу координат? [Excel/Word/Оба/Нет] <Нет>: "
+    )
+  )
+  (if (null choice) (setq choice "Нет"))
+
+  (cond
+    ((= choice "Нет")
+     (princ "\n  Экспорт пропущен.")
+    )
+    (T
+     ;; Запрашиваем базовый путь (расширение можно не указывать)
+     (setq base-path
+       (getfiled "Укажите имя файла для экспорта" "координаты" "csv" 1)
+     )
+     (if (null base-path)
+       (princ "\n  Экспорт отменён пользователем.")
+       (progn
+         ;; Убираем расширение, если пользователь его ввёл вручную
+         (if (wcmatch (strcase base-path) "*.CSV")
+           (setq base-path (substr base-path 1 (- (strlen base-path) 4)))
+         )
+         (cond
+           ((= choice "Excel")
+            (vl:export-csv data-list (strcat base-path ".csv"))
+           )
+           ((= choice "Word")
+            (vl:export-rtf data-list (strcat base-path ".rtf"))
+           )
+           ((= choice "Оба")
+            (vl:export-csv data-list (strcat base-path ".csv"))
+            (vl:export-rtf data-list (strcat base-path ".rtf"))
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
+
+;;; ============================================================
+;;; ГЛАВНАЯ КОМАНДА: VERTEXLEADERS
+;;; Запускается через команду AutoCAD: VERTEXLEADERS
+;;; ============================================================
 (defun c:VERTEXLEADERS (/ sel ename vertices pt-count idx pt
-                         x-coord y-coord coord-text
-                         mleader-style-name text-style-name actual-mleader-style
-                         template-path csv-path doc-path mode
-                         txt-height land-length land-offset
-                         pt-land pt-text
-                         ml-ename num-ename
-                         num-text num-ins-pt
-                         old-osmode old-cmdecho)
+                          x-coord y-coord coord-text
+                          mleader-style-name text-style-name actual-mleader-style
+                          template-path export-data
+                          txt-height land-length land-offset
+                          pt-land pt-text
+                          ml-ename num-ename
+                          num-text num-ins-pt
+                          old-osmode old-cmdecho)
 
   ;; --- Инициализация ---
   (vl-load-com)
-  (setq mleader-style-name "Координаты")
-  (setq text-style-name    "Д-431")
-  
-  ;; УКАЖИТЕ ПУТИ ЗДЕСЬ:
-  (setq template-path "C:/Users/User/Desktop/LISP/++РАМКА++.dwg")
-  (setq csv-path      "C:/Users/User/Desktop/LISP/vertices.csv")
-  (setq doc-path      "C:/Users/User/Desktop/LISP/vertices.doc")
+  (setq mleader-style-name "Координаты")   ; желаемое имя стиля MLEADER
+  (setq text-style-name    "Д-431")        ; имя текстового стиля
+
+  ;; ВАЖНО: укажите здесь реальный путь к вашему файлу-шаблону
+  ;; style_template.dwg, в котором один раз настроен стиль «Координаты».
+  (setq template-path "C:/CAD_Styles/style_template.dwg")
 
   (setq old-osmode  (getvar "OSMODE"))
   (setq old-cmdecho (getvar "CMDECHO"))
   (setvar "CMDECHO" 0)
-  (setvar "OSMODE"  0)
+  (setvar "OSMODE"  0)  ; отключаем привязки на время работы скрипта
 
+  ;; --- Блок обработки ошибок ---
   (defun *error* (msg)
     (setvar "OSMODE"  old-osmode)
     (setvar "CMDECHO" old-cmdecho)
     (if (not (wcmatch (strcase msg) "*CANCEL*,*EXIT*,*QUIT*"))
-      (princ (strcat "\n ОШИБКА: " msg))
+      (princ (strcat "\n  ОШИБКА: " msg))
     )
+    (princ "\n  Команда отменена.")
     (princ)
   )
 
+  (princ "\n=== Простановка координатных выносок по вершинам полилинии ===")
+  (princ "\n  Команда: VERTEXLEADERS")
+
+  ;; --- Проверяем текстовый стиль ---
   (vl:ensure-text-style text-style-name)
-  (vl:ensure-mleader-style-from-template template-path mleader-style-name)
 
-  (setq sel (entsel "\nВыберите полилинию: "))
-  (if (null sel) (exit))
-  (setq ename (car sel))
-
-  (setq vertices (vl:get-polyline-vertices ename))
-  
-  ;; --- ВЫБОР РЕЖИМА ЭКСПОРТА ---
-  (initget "Excel Word Both None")
-  (setq mode (getkword "\nКуда экспортировать? [Excel/Word/Both/None] <Both>: "))
-  (if (null mode) (setq mode "Both"))
-
-  ;; Выполнение экспорта на основе выбора
-  (if (and vertices (not (equal mode "None")))
+  ;; --- Проверяем / импортируем стиль мультивыноски из шаблона ---
+  (if (vl:ensure-mleader-style-from-template template-path mleader-style-name)
+    (setq actual-mleader-style mleader-style-name)
     (progn
-      (if (member mode '("Excel" "Both")) (vl:export-to-csv vertices csv-path))
-      (if (member mode '("Word" "Both")) (vl:export-to-word vertices doc-path))
-      (princ (strcat "\n Экспорт выполнен в режим: " mode))
+      (princ "\n  Использую «Standard» как базу — все параметры оформления")
+      (princ "\n  (без стрелки, полка, текст «Д-431», маска) назначаются вручную.")
+      (setq actual-mleader-style "Standard")
     )
   )
 
-  ;; --- РИСОВАНИЕ ВЫНОСОК ---
-  (setq txt-height (vl:get-text-height))
+  ;; --- Запрашиваем выбор полилинии ---
+  (setq sel (entsel "\nВыберите полилинию: "))
+
+  (if (null sel)
+    (progn
+      (princ "\n  Выбор отменён пользователем.")
+      (setvar "OSMODE"  old-osmode)
+      (setvar "CMDECHO" old-cmdecho)
+      (princ)
+      (exit)
+    )
+  )
+
+  (setq ename (car sel))
+
+  ;; Проверяем, что выбранный объект — полилиния
+  (if (not (member (cdr (assoc 0 (entget ename)))
+                   '("LWPOLYLINE" "POLYLINE" "3DPOLYLINE")))
+    (progn
+      (princ (strcat "\n  ОШИБКА: выбранный объект не является полилинией (тип: "
+                     (cdr (assoc 0 (entget ename))) ")."))
+      (setvar "OSMODE"  old-osmode)
+      (setvar "CMDECHO" old-cmdecho)
+      (princ)
+      (exit)
+    )
+  )
+
+  ;; --- Получаем вершины полилинии ---
+  (setq vertices (vl:get-polyline-vertices ename))
+  (if (null vertices)
+    (progn
+      (princ "\n  ОШИБКА: не удалось извлечь вершины полилинии.")
+      (setvar "OSMODE"  old-osmode)
+      (setvar "CMDECHO" old-cmdecho)
+      (princ)
+      (exit)
+    )
+  )
+
+  (setq pt-count (length vertices))
+  (princ (strcat "\n  Найдено вершин: " (itoa pt-count)))
+
+  ;; --- Параметры оформления ---
+  (setq txt-height  (vl:get-text-height))
   (setq land-length (* txt-height 5.0))
   (setq land-offset (* txt-height 1.0))
 
+  ;; --- Список для накопления данных экспорта: (idx x-str y-str) ---
+  (setq export-data '())
+
+  ;; --- Цикл по вершинам ---
   (setq idx 1)
   (foreach pt vertices
+
+    (princ (strcat "\n  Обработка вершины №" (itoa idx) "..."))
+
     (setq x-coord (car  pt))
     (setq y-coord (cadr pt))
-    (setq coord-text (strcat "x = " (vl:fmt-coord x-coord) "\\Py = " (vl:fmt-coord y-coord)))
-    
-    (setq pt-land (list (+ x-coord land-length) (+ y-coord (* txt-height 3.0)) 0.0))
-    (setq pt-text (list (+ (car pt-land) land-length) (cadr pt-land) 0.0))
 
-    (vl:create-mleader (list x-coord y-coord 0.0) pt-land pt-text coord-text actual-mleader-style)
-    (vl:create-mtext-masked (list (+ (car pt-text) land-offset) (cadr pt-text) 0.0) (itoa idx) txt-height 0.0 7 text-style-name)
-    
+    ;; \P — перевод строки в MTEXT
+    (setq coord-text
+      (strcat
+        "x = " (vl:fmt-coord x-coord)
+        "\\Py = " (vl:fmt-coord y-coord)
+      )
+    )
+
+    ;; Накапливаем данные для последующего экспорта в таблицу
+    (setq export-data
+      (append export-data
+        (list (list idx (vl:fmt-coord x-coord) (vl:fmt-coord y-coord)))
+      )
+    )
+
+    ;; Точка начала полки — правее и выше вершины
+    (setq pt-land
+      (list
+        (+ x-coord land-length)
+        (+ y-coord (* txt-height 3.0))
+        0.0
+      )
+    )
+    ;; Точка конца полки (точка привязки текста)
+    (setq pt-text
+      (list
+        (+ (car pt-land) land-length)
+        (cadr pt-land)                   ; та же высота — полка горизонтальна
+        0.0
+      )
+    )
+
+    ;; --- Создаём мультивыноску (используем actual-mleader-style) ---
+    (setq ml-ename
+      (vl:create-mleader
+        (list x-coord y-coord 0.0)
+        pt-land
+        pt-text
+        coord-text
+        actual-mleader-style
+      )
+    )
+
+    (if ml-ename
+      (princ (strcat "  Мультивыноска №" (itoa idx) " создана."))
+      (princ (strcat "  ПРЕДУПРЕЖДЕНИЕ: мультивыноска №" (itoa idx) " не создана!"))
+    )
+
+    ;; --- Создаём номер вершины как отдельный MTEXT ---
+    (setq num-text (itoa idx))
+    (setq num-ins-pt
+      (list
+        (+ (car pt-text) land-offset)
+        (cadr pt-text)
+        0.0
+      )
+    )
+
+    (setq num-ename
+      (vl:create-mtext-masked
+        num-ins-pt
+        num-text
+        txt-height
+        0.0
+        7                                ; AttachmentPoint 7 = Middle Left
+        text-style-name                  ; Текстовый стиль «Д-431»
+      )
+    )
+
+    (if num-ename
+      (princ (strcat "  Номер вершины №" (itoa idx) " создан."))
+      (princ (strcat "  ПРЕДУПРЕЖДЕНИЕ: номер вершины №" (itoa idx) " не создан!"))
+    )
+
     (setq idx (1+ idx))
-  )
+  ) ; конец foreach
+
+  (princ (strcat "\n  Готово! Создано выносок: " (itoa (1- idx))))
+
+  ;; --- Предлагаем экспортировать таблицу координат ---
+  (vl:offer-export export-data)
 
   (setvar "OSMODE"  old-osmode)
   (setvar "CMDECHO" old-cmdecho)
+
   (command "_.REGEN")
-  (princ "\n=== VERTEXLEADERS завершена. ===")
+
+  (princ "\n=== VERTEXLEADERS завершена ===")
   (princ)
 )
+
+
+;;; ============================================================
+;;; ДОПОЛНИТЕЛЬНАЯ УТИЛИТА: CHECKSTYLE
+;;; Проверяет наличие стиля мультивыноски «Координаты» (импортируя
+;;; его из шаблона при необходимости) и текстового стиля «Д-431».
+;;; Запуск: CHECKSTYLE
+;;; ============================================================
+(defun c:CHECKSTYLE (/ mleader-style-name text-style-name template-path)
+  (setq mleader-style-name "Координаты")
+  (setq text-style-name    "Д-431")
+
+  ;; ВАЖНО: тот же путь к шаблону, что и в c:VERTEXLEADERS
+  (setq template-path "C:/CAD_Styles/style_template.dwg")
+
+  (vl-load-com)
+  (vl:ensure-text-style text-style-name)
+  (vl:ensure-mleader-style-from-template template-path mleader-style-name)
+  (princ)
+)
+
+
+;;; ============================================================
+;;; Сообщение об успешной загрузке
+;;; ============================================================
+(princ "\n+---------------------------------------------------+")
+(princ "\n|  vertex_leaders.lsp успешно загружен.              |")
+(princ "\n|  Доступные команды:                                |")
+(princ "\n|    VERTEXLEADERS — создать выноски по вершинам     |")
+(princ "\n|                    + экспорт в Excel/Word          |")
+(princ "\n|    CHECKSTYLE    — проверить/импортировать стили   |")
+(princ "\n|                    (Координаты / Д-431)            |")
+(princ "\n+---------------------------------------------------+")
+(princ)
+
+;;; ============================================================
+;;; Конец файла vertex_leaders.lsp
+;;; ============================================================
