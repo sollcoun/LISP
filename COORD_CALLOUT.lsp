@@ -1,37 +1,38 @@
 ;;; ============================================================
 ;;; vertex_leaders.lsp
 ;;; AutoLISP-скрипт для простановки координатных выносок
-;;; по вершинам полилинии с использованием мультивыноски MLEADER
+;;; по вершинам полилинии + параллельных размеров по её сегментам.
 ;;;
 ;;; Стиль мультивыноски: «Координаты»
-;;; Текстовый стиль (для координат и номеров вершин): «Д-431»
+;;; Текстовый стиль (для координат, номеров и размеров): «Д-431»
 ;;;
 ;;; Автоматическое создание стиля «Координаты»:
-;;;   Прямое создание объекта MLEADERSTYLE через entmake ненадёжно
-;;;   (обязательные внутренние DXF-группы недокументированы и
-;;;   различаются между версиями AutoCAD). Поэтому стиль
-;;;   импортируется из отдельного чертежа-шаблона (style_template.dwg)
-;;;   путём вставки его как временного блока — AutoCAD при этом
-;;;   автоматически копирует все использованные в шаблоне стили
-;;;   в текущий чертёж. Временный блок сразу удаляется.
-;;;
-;;;   Если стиль импортировать не удалось (шаблон не найден и т.п.),
-;;;   скрипт не падает, а работает на базе стиля "Standard",
+;;;   Прямое создание объекта MLEADERSTYLE через entmake ненадёжно.
+;;;   Стиль импортируется из чертежа-шаблона (style_template.dwg)
+;;;   путём вставки его как временного блока. Если импортировать
+;;;   не удалось — скрипт работает на базе стиля "Standard",
 ;;;   принудительно назначая все нужные параметры оформления
 ;;;   (без стрелки, горизонтальная полка, текстовый стиль «Д-431»,
 ;;;   маска фона) напрямую каждому созданному объекту.
 ;;;
+;;; Параллельные размеры по сегментам полилинии:
+;;;   Для каждого сегмента (между соседними вершинами) создаётся
+;;;   параллельный (aligned) размер, смещённый ПОД полилинию на
+;;;   заданное расстояние. Встроенный текст размера скрывается,
+;;;   а значение длины выводится отдельным MTEXT с маской фона —
+;;;   либо прямо на линии размера (если сегмент достаточно длинный
+;;;   для текста), либо выносится мультивыноской в сторону, если
+;;;   сегмент короче, чем требуется для отображения цифр.
+;;;
 ;;; Экспорт таблицы координат:
 ;;;   После построения выносок скрипт предлагает экспортировать
-;;;   таблицу координат в CSV (Excel) и/или RTF (Word) без
-;;;   использования COM-автоматизации Office.
+;;;   таблицу координат в CSV (Excel) и/или RTF (Word).
 ;;; ============================================================
 
 
 ;;; ------------------------------------------------------------
-;;; Вспомогательная функция: форматирование числа с обязательным
-;;; знаком (+/-) и ровно двумя знаками после запятой.
-;;; Пример: 1234.5 -> "+1234.50",  -789.1 -> "-0789.10"
+;;; Форматирование координаты: обязательный знак (+/-) и ровно
+;;; два знака после запятой. Пример: 1234.5 -> "+1234.50"
 ;;; ------------------------------------------------------------
 (defun vl:fmt-coord (val / sign abs-val int-part frac-part int-str frac-str)
   (setq sign (if (< val 0) "-" "+"))
@@ -49,6 +50,28 @@
                    (strcat "0" (itoa frac-part))
                    (itoa frac-part)))
   (strcat sign int-str "." frac-str)
+)
+
+
+;;; ------------------------------------------------------------
+;;; Форматирование длины сегмента: без знака, ровно два знака
+;;; после запятой. Пример: 1234.5 -> "1234.50"
+;;; ------------------------------------------------------------
+(defun vl:fmt-length (val / abs-val int-part frac-part int-str frac-str)
+  (setq abs-val (abs val))
+  (setq int-part  (fix abs-val))
+  (setq frac-part (fix (+ 0.5 (* (- abs-val int-part) 100))))
+  (if (>= frac-part 100)
+    (progn
+      (setq int-part  (1+ int-part))
+      (setq frac-part 0)
+    )
+  )
+  (setq int-str  (itoa int-part))
+  (setq frac-str (if (< frac-part 10)
+                   (strcat "0" (itoa frac-part))
+                   (itoa frac-part)))
+  (strcat int-str "." frac-str)
 )
 
 
@@ -77,7 +100,6 @@
     (progn
       (princ (strcat "\n  Текстовый стиль «" style-name "» не найден. Создаю..."))
       (setq ts (vla-add styles style-name))
-      ;; Шрифт по умолчанию — при необходимости замените на нужный
       (vl-catch-all-apply '(lambda () (vla-put-fontfile ts "arial.ttf")))
       (princ (strcat "\n  Текстовый стиль «" style-name "» создан."))
     )
@@ -88,34 +110,39 @@
 
 
 ;;; ------------------------------------------------------------
-;;; Автоматически подтягивает стиль мультивыноски (и все объекты,
-;;; которые он использует) из чертежа-шаблона, если стиля нет
-;;; в текущем чертеже. Работает через вставку чертежа-шаблона
-;;; как блока — AutoCAD при этом копирует все использованные
-;;; в шаблоне именованные объекты (стили, слои, типы линий)
-;;; в текущий чертёж. После вставки временный блок удаляется.
+;;; Проверяет, является ли полилиния замкнутой.
+;;; Работает через ActiveX-свойство Closed (LWPOLYLINE / POLYLINE).
+;;; ------------------------------------------------------------
+(defun vl:polyline-closed-p (ename / obj result)
+  (vl-load-com)
+  (setq obj (vlax-ename->vla-object ename))
+  (setq result (vl-catch-all-apply 'vla-get-Closed (list obj)))
+  (if (vl-catch-all-error-p result)
+    nil
+    result
+  )
+)
+
+
+;;; ------------------------------------------------------------
+;;; Автоматически подтягивает стиль мультивыноски из чертежа-
+;;; шаблона, если стиля нет в текущем чертеже (через вставку
+;;; шаблона как временного блока с последующим удалением).
 ;;;
-;;; Аргументы:
-;;;   template-path — полный путь к файлу style_template.dwg
-;;;   mleader-style — ожидаемое имя стиля мультивыноски
-;;;
-;;; Возвращает T, если стиль есть в чертеже (был или появился),
-;;; и nil, если импортировать не удалось.
+;;; Возвращает T, если стиль есть в чертеже, и nil в противном случае.
 ;;; ------------------------------------------------------------
 (defun vl:ensure-mleader-style-from-template (template-path mleader-style
                                                / old-filedia old-cmdecho old-osmode)
-  ;; Если стиль уже есть — ничего делать не нужно
   (if (vl:mleader-style-exists-p mleader-style)
     (progn
       (princ (strcat "\n  Стиль «" mleader-style "» уже есть в чертеже."))
       T
     )
-    ;; Стиля нет — пробуем импортировать из шаблона
     (if (not (findfile template-path))
       (progn
         (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: файл шаблона не найден: " template-path))
         (princ "\n  Создайте style_template.dwg с настроенным стилем «Координаты»")
-        (princ "\n  (см. инструкцию) и укажите верный путь в переменной template-path.")
+        (princ "\n  и укажите верный путь в переменной template-path.")
         nil
       )
       (progn
@@ -123,24 +150,17 @@
         (setq old-filedia (getvar "FILEDIA"))
         (setq old-cmdecho (getvar "CMDECHO"))
         (setq old-osmode  (getvar "OSMODE"))
-        (setvar "FILEDIA" 0)   ; отключаем диалоги выбора файлов
+        (setvar "FILEDIA" 0)
         (setvar "CMDECHO" 0)
         (setvar "OSMODE"  0)
 
-        ;; Вставляем чертёж-шаблон как блок в точку (0,0,0).
-        ;; Это подтягивает используемые в нём стили в текущий чертёж.
         (command "_.-INSERT" template-path "_S" 1.0 "" "0,0,0" 0.0)
-
-        ;; Удаляем последний созданный объект (вставленный блок) —
-        ;; нужные стили уже скопированы и останутся в чертеже.
         (command "_.ERASE" "_L" "")
 
-        ;; Восстанавливаем системные переменные
         (setvar "FILEDIA" old-filedia)
         (setvar "CMDECHO" old-cmdecho)
         (setvar "OSMODE"  old-osmode)
 
-        ;; Проверяем результат
         (if (vl:mleader-style-exists-p mleader-style)
           (progn
             (princ (strcat "\n  Стиль «" mleader-style "» успешно импортирован."))
@@ -160,22 +180,22 @@
 
 ;;; ------------------------------------------------------------
 ;;; Создаёт MLEADER (мультивыноску) через ActiveX (vla-объекты).
-;;; Все ключевые параметры (без стрелки, горизонтальная полка,
-;;; текст, маска фона) назначаются напрямую — это гарантирует
-;;; правильный вид независимо от того, какой базовый стиль
-;;; фактически используется (импортированный "Координаты" или
-;;; резервный "Standard").
+;;; Все ключевые параметры назначаются напрямую каждому объекту —
+;;; это гарантирует правильный вид независимо от базового стиля.
 ;;;
 ;;; Аргументы:
-;;;   pt-arrow   — точка «острия» выноски (вершина полилинии)
+;;;   pt-arrow   — точка «острия» выноски
 ;;;   pt-land    — точка начала горизонтальной полки
-;;;   pt-text    — точка привязки текста (конец полки)
-;;;   mtext-str  — строка содержимого (координаты x, y)
+;;;   pt-text    — точка привязки текста (справочно, для геометрии
+;;;                самой линии выноски; фактическая длина полки
+;;;                задаётся отдельно параметром dogleg-len)
+;;;   mtext-str  — строка содержимого
 ;;;   style-name — имя базового стиля MLEADER
+;;;   dogleg-len — желаемая длина горизонтальной полки
 ;;;
 ;;; Возвращает: entity name созданного MLEADER или nil
 ;;; ------------------------------------------------------------
-(defun vl:create-mleader (pt-arrow pt-land pt-text mtext-str style-name
+(defun vl:create-mleader (pt-arrow pt-land pt-text mtext-str style-name dogleg-len
                            / acadobj mspace mleader pts-variant)
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
@@ -204,9 +224,13 @@
       (vl-catch-all-apply
         '(lambda () (vla-put-ArrowheadType mleader 20))
       )
-      ;; Включаем горизонтальную полку
+      ;; --- Включаем горизонтальную полку (правильное имя свойства!) ---
       (vl-catch-all-apply
-        '(lambda () (vla-put-EnableLanding mleader :vlax-true))
+        '(lambda () (vla-put-EnableDogleg mleader :vlax-true))
+      )
+      ;; --- Реальная длина полки ---
+      (vl-catch-all-apply
+        '(lambda () (vla-put-DoglegLength mleader dogleg-len))
       )
       ;; Тип выноски: 1 = прямая линия
       (vl-catch-all-apply
@@ -220,18 +244,19 @@
       (vl-catch-all-apply
         '(lambda () (vla-put-TextString mleader mtext-str))
       )
-      ;; Выравнивание текста: по левому краю
+      ;; --- Выравнивание текста: по левому краю (один аргумент!) ---
       (vl-catch-all-apply
-        '(lambda () (vla-put-TextAttachmentType mleader 1 1))
+        '(lambda () (vla-put-TextAttachmentType mleader 1))
       )
       (vl-catch-all-apply
         '(lambda () (vla-put-TextAngle mleader 0.0))
       )
-      ;; Маска фона для текста мультивыноски
+      ;; --- Маска фона для текста мультивыноски (с явным цветом) ---
       (vl-catch-all-apply
         '(lambda ()
            (vla-put-TextBackgroundFill mleader :vlax-true)
-           (vla-put-TextBackgroundScaleFactor mleader 1.5)
+           (vla-put-TextBackgroundScaleFactor mleader 1.0)
+           (vla-put-TextBackgroundColor mleader 254)
         )
       )
       (vlax-vla-object->ename mleader)
@@ -241,8 +266,8 @@
 
 
 ;;; ------------------------------------------------------------
-;;; Создаёт MTEXT с включённой маской фона (background mask)
-;;; и заданным текстовым стилем.
+;;; Создаёт MTEXT с включённой маской фона и заданным текстовым
+;;; стилем.
 ;;;
 ;;; Аргументы:
 ;;;   ins-pt     — точка вставки текста
@@ -250,7 +275,7 @@
 ;;;   height     — высота текста
 ;;;   width      — ширина текстового поля (0 = авто)
 ;;;   just       — выравнивание (AttachmentPoint)
-;;;   style-name — имя текстового стиля (например, "Д-431")
+;;;   style-name — имя текстового стиля
 ;;; ------------------------------------------------------------
 (defun vl:create-mtext-masked (ins-pt txt-str height width just style-name
                                 / mspace doc mt)
@@ -264,7 +289,6 @@
   (if mt
     (progn
       (vla-put-Height mt (float height))
-      ;; Текстовый стиль (Д-431)
       (vl-catch-all-apply
         '(lambda () (vla-put-StyleName mt style-name))
       )
@@ -272,12 +296,137 @@
       (vl-catch-all-apply
         '(lambda ()
            (vla-put-BackgroundFill mt :vlax-true)
-           (vla-put-BackgroundScaleFactor mt 1.5)
+           (vla-put-BackgroundScaleFactor mt 1.0)
+           (vla-put-BackgroundColor mt 254)
         )
       )
       (vlax-vla-object->ename mt)
     )
     nil
+  )
+)
+
+
+;;; ------------------------------------------------------------
+;;; Создаёт параллельный (aligned) размер вдоль сегмента pt1-pt2,
+;;; смещённый ПОД полилинию на расстояние offset-dist.
+;;;
+;;; Встроенный текст размера скрывается (override на пробел),
+;;; а значение длины выводится отдельным замаскированным MTEXT:
+;;;   - прямо по центру линии размера, если сегмент достаточно
+;;;     длинный, чтобы вместить текст;
+;;;   - иначе — выносится мультивыноской в сторону (аналогично
+;;;     выноскам номеров вершин).
+;;;
+;;; Аргументы:
+;;;   pt1, pt2          — концы сегмента полилинии (точки вершин)
+;;;   offset-dist       — расстояние от полилинии до линии размера
+;;;   txt-height        — высота текста
+;;;   text-style-name   — текстовый стиль (например, «Д-431»)
+;;;   mleader-style-name— стиль мультивыноски для выноса значения
+;;; ------------------------------------------------------------
+(defun vl:create-parallel-dim-with-label
+       (pt1 pt2 offset-dist txt-height text-style-name mleader-style-name
+        / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
+          dim-obj length-str char-count required-width label-ename)
+
+  (vl-load-com)
+  (setq acadobj (vlax-get-acad-object))
+  (setq mspace  (vla-get-modelspace (vla-get-activedocument acadobj)))
+
+  ;; --- Вектор сегмента и его длина ---
+  (setq dx (- (car pt2) (car pt1)))
+  (setq dy (- (cadr pt2) (cadr pt1)))
+  (setq seg-len (sqrt (+ (* dx dx) (* dy dy))))
+
+  ;; --- Перпендикуляр к сегменту (нормированный) ---
+  (if (> seg-len 1e-9)
+    (progn
+      (setq perp-x (/ (- dy) seg-len))
+      (setq perp-y (/ dx seg-len))
+      ;; Если перпендикуляр направлен вверх — разворачиваем на 180°,
+      ;; чтобы линия размера всегда была ПОД полилинией
+      (if (> perp-y 0.0)
+        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
+      )
+    )
+    ;; Вырожденный (нулевой) сегмент — перпендикуляр "вниз" по умолчанию
+    (progn (setq perp-x 0.0) (setq perp-y -1.0))
+  )
+
+  ;; --- Средняя точка сегмента ---
+  (setq mid-pt
+    (list (/ (+ (car pt1) (car pt2)) 2.0)
+          (/ (+ (cadr pt1) (cadr pt2)) 2.0)
+          0.0)
+  )
+
+  ;; --- Точка, задающая положение линии размера (смещена вниз) ---
+  (setq dim-pt
+    (list
+      (+ (car mid-pt) (* perp-x offset-dist))
+      (+ (cadr mid-pt) (* perp-y offset-dist))
+      0.0
+    )
+  )
+
+  ;; --- Создаём параллельный (aligned) размер ---
+  (setq dim-obj
+    (vla-AddDimAligned
+      mspace
+      (vlax-3d-point pt1)
+      (vlax-3d-point pt2)
+      (vlax-3d-point dim-pt)
+    )
+  )
+
+  (if (null dim-obj)
+    (progn
+      (princ "\n  ОШИБКА: не удалось создать параллельный размер.")
+      nil
+    )
+    (progn
+      ;; Скрываем встроенный текст размера (стандартный приём: один пробел)
+      (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
+
+      ;; --- Формируем строку значения длины ---
+      (setq length-str (vl:fmt-length seg-len))
+      (setq char-count (strlen length-str))
+
+      ;; --- Оцениваем, помещается ли текст на линии размера ---
+      ;; Приблизительная ширина одного символа ~ 0.6 * высота текста
+      (setq required-width (* char-count txt-height 0.6))
+
+      (if (>= seg-len required-width)
+        ;; --- Сегмент достаточно длинный: подпись прямо на линии размера ---
+        (setq label-ename
+          (vl:create-mtext-masked
+            dim-pt
+            length-str
+            txt-height
+            0.0
+            5                    ; AttachmentPoint 5 = Middle Center
+            text-style-name
+          )
+        )
+        ;; --- Сегмент короче требуемой ширины: выносим мультивыноской ---
+        (progn
+          (princ (strcat "\n  Сегмент короче подписи (" length-str
+                         ") — значение вынесено мультивыноской."))
+          (setq label-ename
+            (vl:create-mleader
+              dim-pt
+              (list (+ (car dim-pt) (* txt-height 3.0)) (cadr dim-pt) 0.0)
+              (list (+ (car dim-pt) (* txt-height 6.0)) (cadr dim-pt) 0.0)
+              length-str
+              mleader-style-name
+              (* txt-height 1.5)
+            )
+          )
+        )
+      )
+      label-ename
+    )
   )
 )
 
@@ -333,8 +482,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Экспортирует таблицу координат в CSV-файл (открывается в Excel).
-;;; Разделитель ";" — корректно распознаётся Excel с русской
-;;; локалью (где "," используется как десятичный разделитель).
+;;; Разделитель ";" — корректно распознаётся Excel с русской локалью.
 ;;;
 ;;; Аргумент data-list — список записей вида (idx x-str y-str)
 ;;; ------------------------------------------------------------
@@ -346,9 +494,7 @@
       nil
     )
     (progn
-      ;; Заголовок таблицы
       (write-line "№;X;Y" f)
-      ;; Строки данных
       (foreach row data-list
         (write-line
           (strcat (itoa (car row)) ";" (cadr row) ";" (caddr row))
@@ -365,8 +511,7 @@
 
 ;;; ------------------------------------------------------------
 ;;; Экспортирует таблицу координат в RTF-файл с настоящей таблицей
-;;; (открывается в Word как готовый форматированный документ,
-;;; без необходимости COM-автоматизации Word).
+;;; (открывается в Word без COM-автоматизации).
 ;;;
 ;;; Аргумент data-list — список записей вида (idx x-str y-str)
 ;;; ------------------------------------------------------------
@@ -378,12 +523,10 @@
       nil
     )
     (progn
-      ;; Границы столбцов таблицы (в твипах: 1 см ? 567 твипов)
-      (setq col1 1200)  ; ширина столбца "№"
-      (setq col2 3600)  ; ширина столбца "X"
-      (setq col3 6000)  ; ширина столбца "Y"
+      (setq col1 1200)
+      (setq col2 3600)
+      (setq col3 6000)
 
-      ;; Определение строки таблицы (границы всех ячеек)
       (setq row-def
         (strcat
           "\\trowd\\trgaph108\\trleft0"
@@ -396,17 +539,14 @@
         )
       )
 
-      ;; --- Заголовок RTF-документа ---
       (write-line "{\\rtf1\\ansi\\ansicpg1251\\deff0" f)
       (write-line "{\\fonttbl{\\f0 Arial;}}" f)
       (write-line "\\f0\\fs24" f)
       (write-line "{\\b Таблица координат вершин полилинии}\\par\\par" f)
 
-      ;; --- Заголовочная строка таблицы ---
       (write-line row-def f)
       (write-line "\\intbl\\qc\\b №\\cell\\qc X\\cell\\qc Y\\cell\\row\\b0" f)
 
-      ;; --- Строки данных ---
       (foreach row data-list
         (write-line row-def f)
         (write-line
@@ -419,7 +559,6 @@
         )
       )
 
-      ;; --- Закрытие RTF-документа ---
       (write-line "}" f)
       (close f)
       (princ (strcat "\n  Файл RTF (Word) сохранён: " rtf-path))
@@ -432,8 +571,6 @@
 ;;; ------------------------------------------------------------
 ;;; Запрашивает у пользователя, нужно ли экспортировать таблицу
 ;;; координат, и в каком формате (Excel / Word / Оба / Нет).
-;;; При положительном ответе запрашивает путь для сохранения
-;;; через стандартный диалог и вызывает соответствующий экспорт.
 ;;;
 ;;; Аргумент data-list — список записей вида (idx x-str y-str)
 ;;; ------------------------------------------------------------
@@ -451,14 +588,12 @@
      (princ "\n  Экспорт пропущен.")
     )
     (T
-     ;; Запрашиваем базовый путь (расширение можно не указывать)
      (setq base-path
        (getfiled "Укажите имя файла для экспорта" "координаты" "csv" 1)
      )
      (if (null base-path)
        (princ "\n  Экспорт отменён пользователем.")
        (progn
-         ;; Убираем расширение, если пользователь его ввёл вручную
          (if (wcmatch (strcase base-path) "*.CSV")
            (setq base-path (substr base-path 1 (- (strlen base-path) 4)))
          )
@@ -489,10 +624,11 @@
                           x-coord y-coord coord-text
                           mleader-style-name text-style-name actual-mleader-style
                           template-path export-data
-                          txt-height land-length land-offset
+                          txt-height land-length
                           pt-land pt-text
                           ml-ename num-ename
                           num-text num-ins-pt
+                          dim-offset seg-count seg-idx seg-pt1 seg-pt2
                           old-osmode old-cmdecho)
 
   ;; --- Инициализация ---
@@ -501,13 +637,12 @@
   (setq text-style-name    "Д-431")        ; имя текстового стиля
 
   ;; ВАЖНО: укажите здесь реальный путь к вашему файлу-шаблону
-  ;; style_template.dwg, в котором один раз настроен стиль «Координаты».
-  (setq template-path "C:/CAD_Styles/style_template.dwg")
+  (setq template-path "C:/Users/User/Desktop/LISP/++РАМКА++.dwg")
 
   (setq old-osmode  (getvar "OSMODE"))
   (setq old-cmdecho (getvar "CMDECHO"))
   (setvar "CMDECHO" 0)
-  (setvar "OSMODE"  0)  ; отключаем привязки на время работы скрипта
+  (setvar "OSMODE"  0)
 
   ;; --- Блок обработки ошибок ---
   (defun *error* (msg)
@@ -520,7 +655,7 @@
     (princ)
   )
 
-  (princ "\n=== Простановка координатных выносок по вершинам полилинии ===")
+  (princ "\n=== Простановка координатных выносок и размеров по полилинии ===")
   (princ "\n  Команда: VERTEXLEADERS")
 
   ;; --- Проверяем текстовый стиль ---
@@ -530,8 +665,8 @@
   (if (vl:ensure-mleader-style-from-template template-path mleader-style-name)
     (setq actual-mleader-style mleader-style-name)
     (progn
-      (princ "\n  Использую «Standard» как базу — все параметры оформления")
-      (princ "\n  (без стрелки, полка, текст «Д-431», маска) назначаются вручную.")
+      (princ "\n  Использую «Standard» как базу — параметры оформления")
+      (princ "\n  назначаются вручную каждому объекту.")
       (setq actual-mleader-style "Standard")
     )
   )
@@ -551,7 +686,6 @@
 
   (setq ename (car sel))
 
-  ;; Проверяем, что выбранный объект — полилиния
   (if (not (member (cdr (assoc 0 (entget ename)))
                    '("LWPOLYLINE" "POLYLINE" "3DPOLYLINE")))
     (progn
@@ -580,14 +714,16 @@
   (princ (strcat "\n  Найдено вершин: " (itoa pt-count)))
 
   ;; --- Параметры оформления ---
-  (setq txt-height  (vl:get-text-height))
-  (setq land-length (* txt-height 5.0))
-  (setq land-offset (* txt-height 1.0))
+  (setq txt-height  1.0)
+  (setq land-length (* txt-height 1.5))
+  (setq dim-offset  0.5)    ; расстояние от полилинии до линии размера
 
   ;; --- Список для накопления данных экспорта: (idx x-str y-str) ---
   (setq export-data '())
 
-  ;; --- Цикл по вершинам ---
+  ;; ============================================================
+  ;; ЧАСТЬ 1: координатные выноски и номера по каждой вершине
+  ;; ============================================================
   (setq idx 1)
   (foreach pt vertices
 
@@ -596,7 +732,6 @@
     (setq x-coord (car  pt))
     (setq y-coord (cadr pt))
 
-    ;; \P — перевод строки в MTEXT
     (setq coord-text
       (strcat
         "x = " (vl:fmt-coord x-coord)
@@ -604,31 +739,28 @@
       )
     )
 
-    ;; Накапливаем данные для последующего экспорта в таблицу
     (setq export-data
       (append export-data
         (list (list idx (vl:fmt-coord x-coord) (vl:fmt-coord y-coord)))
       )
     )
 
-    ;; Точка начала полки — правее и выше вершины
+    ;; Точка начала полки — чуть выше и правее вершины
     (setq pt-land
       (list
         (+ x-coord land-length)
-        (+ y-coord (* txt-height 3.0))
+        (+ y-coord (* txt-height 0.8))
         0.0
       )
     )
-    ;; Точка конца полки (точка привязки текста)
     (setq pt-text
       (list
         (+ (car pt-land) land-length)
-        (cadr pt-land)                   ; та же высота — полка горизонтальна
+        (cadr pt-land)
         0.0
       )
     )
 
-    ;; --- Создаём мультивыноску (используем actual-mleader-style) ---
     (setq ml-ename
       (vl:create-mleader
         (list x-coord y-coord 0.0)
@@ -636,6 +768,7 @@
         pt-text
         coord-text
         actual-mleader-style
+        land-length
       )
     )
 
@@ -644,15 +777,9 @@
       (princ (strcat "  ПРЕДУПРЕЖДЕНИЕ: мультивыноска №" (itoa idx) " не создана!"))
     )
 
-    ;; --- Создаём номер вершины как отдельный MTEXT ---
+    ;; --- Номер вершины: прямо у самой вершины полилинии ---
     (setq num-text (itoa idx))
-    (setq num-ins-pt
-      (list
-        (+ (car pt-text) land-offset)
-        (cadr pt-text)
-        0.0
-      )
-    )
+    (setq num-ins-pt (list x-coord y-coord 0.0))
 
     (setq num-ename
       (vl:create-mtext-masked
@@ -660,8 +787,8 @@
         num-text
         txt-height
         0.0
-        7                                ; AttachmentPoint 7 = Middle Left
-        text-style-name                  ; Текстовый стиль «Д-431»
+        1                                ; AttachmentPoint 1 = Top Left
+        text-style-name
       )
     )
 
@@ -674,6 +801,39 @@
   ) ; конец foreach
 
   (princ (strcat "\n  Готово! Создано выносок: " (itoa (1- idx))))
+
+  ;; ============================================================
+  ;; ЧАСТЬ 2: параллельные размеры по сегментам полилинии
+  ;; ============================================================
+  (princ "\n\n  Проставляю параллельные размеры по сегментам полилинии...")
+
+  (setq seg-count (1- pt-count))
+  (setq seg-idx 0)
+  (while (< seg-idx seg-count)
+    (setq seg-pt1 (nth seg-idx vertices))
+    (setq seg-pt2 (nth (1+ seg-idx) vertices))
+
+    (princ (strcat "\n  Сегмент " (itoa (1+ seg-idx)) "-" (itoa (+ seg-idx 2)) "..."))
+
+    (vl:create-parallel-dim-with-label
+      seg-pt1 seg-pt2 dim-offset txt-height text-style-name actual-mleader-style
+    )
+
+    (setq seg-idx (1+ seg-idx))
+  )
+
+  ;; Если полилиния замкнута — добавляем размер для замыкающего сегмента
+  (if (vl:polyline-closed-p ename)
+    (progn
+      (princ (strcat "\n  Замыкающий сегмент " (itoa pt-count) "-1 (полилиния замкнута)..."))
+      (vl:create-parallel-dim-with-label
+        (nth (1- pt-count) vertices) (nth 0 vertices)
+        dim-offset txt-height text-style-name actual-mleader-style
+      )
+    )
+  )
+
+  (princ "\n  Параллельные размеры проставлены.")
 
   ;; --- Предлагаем экспортировать таблицу координат ---
   (vl:offer-export export-data)
@@ -690,16 +850,11 @@
 
 ;;; ============================================================
 ;;; ДОПОЛНИТЕЛЬНАЯ УТИЛИТА: CHECKSTYLE
-;;; Проверяет наличие стиля мультивыноски «Координаты» (импортируя
-;;; его из шаблона при необходимости) и текстового стиля «Д-431».
-;;; Запуск: CHECKSTYLE
 ;;; ============================================================
 (defun c:CHECKSTYLE (/ mleader-style-name text-style-name template-path)
   (setq mleader-style-name "Координаты")
   (setq text-style-name    "Д-431")
-
-  ;; ВАЖНО: тот же путь к шаблону, что и в c:VERTEXLEADERS
-  (setq template-path "C:/CAD_Styles/style_template.dwg")
+  (setq template-path "C:/Users/User/Desktop/LISP/++РАМКА++.dwg")
 
   (vl-load-com)
   (vl:ensure-text-style text-style-name)
@@ -714,10 +869,8 @@
 (princ "\n+---------------------------------------------------+")
 (princ "\n|  vertex_leaders.lsp успешно загружен.              |")
 (princ "\n|  Доступные команды:                                |")
-(princ "\n|    VERTEXLEADERS — создать выноски по вершинам     |")
-(princ "\n|                    + экспорт в Excel/Word          |")
+(princ "\n|    VERTEXLEADERS — координаты + размеры + экспорт  |")
 (princ "\n|    CHECKSTYLE    — проверить/импортировать стили   |")
-(princ "\n|                    (Координаты / Д-431)            |")
 (princ "\n+---------------------------------------------------+")
 (princ)
 
