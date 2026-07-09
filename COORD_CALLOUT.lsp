@@ -59,6 +59,16 @@
 (if (not (boundp '*VL:LAST-VERTEX-NUM*)) (setq *VL:LAST-VERTEX-NUM* nil))
 (if (not (boundp '*VL:ALL-EXPORT-DATA*)) (setq *VL:ALL-EXPORT-DATA* '()))
 (if (not (boundp '*VL:LAST-POLY-ENAME*)) (setq *VL:LAST-POLY-ENAME* nil))
+;;; ------------------------------------------------------------
+;;; Определяем папку, в которой лежит сам .lsp-файл — чтобы не
+;;; прописывать полный путь к шаблону вручную. Работает независимо
+;;; от того, из какой папки был выполнен APPLOAD.
+;;; ------------------------------------------------------------
+(if (not (boundp '*VL:SCRIPT-DIR*))
+  (setq *VL:SCRIPT-DIR*
+    (vl-filename-directory (findfile "vertex_leaders.lsp"))
+  )
+)
 
 
 ;;; ------------------------------------------------------------
@@ -893,7 +903,7 @@
   (setq block-scale 1.0)
 
   ;; ВАЖНО: укажите здесь реальный путь к вашему файлу-шаблону
-  (setq template-path "D:/Projects/Lisp/LISP/++РАМКА++.dwg")
+ (setq template-path (strcat *VL:SCRIPT-DIR* "/++РАМКА++.dwg"))
 
   (setq old-osmode  (getvar "OSMODE"))
   (setq old-cmdecho (getvar "CMDECHO"))
@@ -1177,7 +1187,7 @@
 (defun c:CHECKSTYLE (/ mleader-style-name text-style-name template-path)
   (setq mleader-style-name "Координаты")
   (setq text-style-name    "Д-431")
-  (setq template-path "D:/Projects/Lisp/LISP/++РАМКА++.dwg")
+ (setq template-path (strcat *VL:SCRIPT-DIR* "/++РАМКА++.dwg"))
 
   (vl-load-com)
   (vl:ensure-text-style text-style-name)
