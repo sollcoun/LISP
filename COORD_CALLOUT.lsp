@@ -8349,8 +8349,8 @@
   (setq pt (vl-catch-all-apply 'vlax-get (list blk-obj 'InsertionPoint)))
   (if (not (vl-catch-all-error-p pt))
     (progn
-      (setq x (car pt))
-      (setq y (cadr pt))
+      (setq x (cadr pt))   ; "геодезическа€" X = вертикаль чертежа
+      (setq y (car pt))    ; "геодезическа€" Y = горизонталь чертежа
       (setq atts (vl-catch-all-apply 'vlax-invoke (list blk-obj 'GetAttributes)))
       (if (not (vl-catch-all-error-p atts))
         (foreach att atts
@@ -9029,8 +9029,15 @@
   ;; ============================================================
   (foreach pt vertices
     (princ (strcat "\n  ќбработка вершины є" (itoa idx) "..."))
-    (setq x-coord (car pt))
-    (setq y-coord (cadr pt))
+
+    ;; –еальные координаты точки на чертеже Ч используютс€ дл€ геометрии
+    (setq real-x (car pt))
+    (setq real-y (cadr pt))
+
+    ;; "√еодезические" X/Y Ч только дл€ текста подписи
+    ;; (X = вертикальна€ ось, Y = горизонтальна€)
+    (setq x-coord real-y)
+    (setq y-coord real-x)
 
     ;; Ќакапливаем данные в √ЋќЅјЋ№Ќџ… список
     (setq *VL:ALL-EXPORT-DATA*
@@ -9038,28 +9045,23 @@
         (list (list idx (vl:fmt-coord x-coord) (vl:fmt-coord y-coord)))
       )
     )
-
     (setq coord-text (strcat "X= " (vl:fmt-coord x-coord) "\\PY= " (vl:fmt-coord y-coord)))
-
-    (setq pt-land (list (+ x-coord land-length) (+ y-coord (* txt-height 0.8)) 0.0))
+    (setq pt-land (list (+ real-x land-length) (+ real-y (* txt-height 0.8)) 0.0))
     (setq pt-text (list (+ (car pt-land) land-length) (cadr pt-land) 0.0))
-
     (if (= output-mode "ћультивыноска")
-      (vl:create-mleader (list x-coord y-coord 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
+      (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
       (vl:insert-coord-block
-        (list x-coord y-coord 0.0)   ; точка вставки блока = точка вершины полилинии
+        (list real-x real-y 0.0)   ; точка вставки блока = реальна€ точка вершины полилинии
         coord-block-name
-        (vl:fmt-coord x-coord)       ; уже содержит знак +/- Ч префикс "X=" рисует сам блок
-        (vl:fmt-coord y-coord)       ; уже содержит знак +/- Ч префикс "Y=" рисует сам блок
+        (vl:fmt-coord x-coord)     ; текст атрибута X = "геодезическа€" вертикаль
+        (vl:fmt-coord y-coord)     ; текст атрибута Y = "геодезическа€" горизонталь
         block-scale
-        txt-height                   ; высота текста атрибутов = высота текста мультивыноски
+        txt-height
       )
     )
-
-    (vl:create-mtext-masked (list x-coord y-coord 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
-
+    (vl:create-mtext-masked (list real-x real-y 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
     (setq idx (1+ idx))
-  )
+)
 
   ;; «апоминаем состо€ние
   (setq *VL:LAST-POLY-ENAME* ename)
