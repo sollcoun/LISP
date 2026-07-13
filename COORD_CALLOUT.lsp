@@ -8539,7 +8539,8 @@
 
 ;; Если после теста подписи начнут уходить НЕ наружу от контура,
 ;; а внутрь фигуры — поменяйте 1.0 на -1.0 в этой строке.
-(if (not (boundp '*VL:OUTWARD-DIR-FLIP*)) (setq *VL:OUTWARD-DIR-FLIP* 1.0))
+(if (not (boundp '*VL:OUTWARD-DIR-FLIP*)) (setq *VL:OUTWARD-DIR-FLIP* -1.0))
+(setq *VL:OUTWARD-DIR-FLIP* -1.0)
 
 ;; Знак ориентации обхода полилинии по формуле площади (шнуровка):
 ;; >0 — против часовой стрелки, <0 — по часовой стрелке.
@@ -8620,17 +8621,23 @@
 
 (defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
                                  / angles radii found best-pt cand cbbox ok
-                                   seg-i p1 p2 outward-ang sorted-angles ss)
+                                   seg-i p1 p2 outward-ang sorted-angles)
 
-  (princ (strcat "\nDebug: Vertex " (itoa vertex-idx) " pt=" (vl-princ-to-string vertex-pt)))
-
-  (setq angles '(0 22.5 45 67.5 90 112.5 135 157.5 180 202.5 225 247.5 270 292.5 315 337.5))
   (setq outward-ang (vl:outward-angle vertices seg-count vertex-idx closed
                       (vl:polygon-orientation-sign vertices seg-count closed)))
+  (if (null outward-ang) (setq outward-ang 0.0))
+
+  (princ (strcat "\nDebug Vertex " (itoa vertex-idx) " outward=" (rtos outward-ang 2 1)))
+
+  (setq angles '(0 22.5 45 67.5 90 112.5 135 157.5 180 202.5 225 247.5 270 292.5 315 337.5))
   (setq sorted-angles (vl:sort-angles-by-target angles outward-ang))
 
-  (setq radii (list base-radius (* base-radius 1.4) (* base-radius 2.0) 
-                    (* base-radius 3.0) (* base-radius 5.0)))
+  ;; Ещё большие расстояния
+  (setq radii (list (* base-radius 3.0) 
+                    (* base-radius 5.0) 
+                    (* base-radius 8.0) 
+                    (* base-radius 12.0) 
+                    (* base-radius 18.0)))
 
   (setq found nil)
 
@@ -8643,12 +8650,10 @@
             (setq cbbox (vl:bbox-make-centered (car cand) (cadr cand) label-w label-h))
             (setq ok T)
 
-            ;; 1. Уже размещённые подписи
             (foreach pb *VL:PLACED-BBOXES*
               (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
             )
 
-            ;; 2. Сегменты полилинии
             (setq seg-i 0)
             (repeat seg-count
               (if ok
@@ -8664,7 +8669,6 @@
               (setq seg-i (1+ seg-i))
             )
 
-            ;; 3. Замыкающий сегмент
             (if (and ok closed)
               (progn
                 (setq p1 (nth seg-count vertices))
@@ -8676,30 +8680,11 @@
               )
             )
 
-            ;; ;; 4. Другие объекты чертежа
-            ;; (if ok
-            ;;   (progn
-            ;;     (setq ss (ssget "C" 
-            ;;               (list (nth 0 cbbox) (nth 1 cbbox))
-            ;;               (list (nth 2 cbbox) (nth 3 cbbox))
-            ;;               '((0 . "~INSERT,MTEXT,MLEADER,LEADER,DIMENSION,ACAD_TABLE"))
-            ;;             ))
-            ;;     (if (and ss (> (sslength ss) 0))
-            ;;       (progn
-            ;;         (princ (strcat "\n  ? Vertex " (itoa vertex-idx) 
-            ;;                        " angle " (rtos ang 2 1) 
-            ;;                        " blocked by " (itoa (sslength ss)) " other objects"))
-            ;;         (setq ok nil)
-            ;;       )
-            ;;     )
-            ;;   )
-            ;; )
-
             (if ok
               (progn 
                 (setq best-pt cand) 
                 (setq found T)
-                (princ (strcat "\n  ? Vertex " (itoa vertex-idx) " placed at angle " (rtos ang 2 1) ", rad " (rtos rad 2 1)))
+                (princ (strcat "  ? angle " (rtos ang 2 1) ", rad " (rtos rad 2 1)))
               )
             )
           )
@@ -8710,8 +8695,8 @@
 
   (if (not found)
     (progn
-      (princ (strcat "\nDebug: ALL ANGLES REJECTED for vertex " (itoa vertex-idx) " - fallback"))
-      (setq best-pt (vl:candidate-point vertex-pt outward-ang (* base-radius 3.0)))
+      (princ "\n  ALL ANGLES REJECTED ? fallback")
+      (setq best-pt (vl:candidate-point vertex-pt (if outward-ang outward-ang 0) (* base-radius 12.0)))
     )
   )
 
@@ -8720,6 +8705,7 @@
 
   best-pt
 )
+
 (defun vl:create-parallel-dim-with-label
        (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
         / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
