@@ -8453,6 +8453,269 @@
   (princ)
 )
 
+;;; ============================================================
+;;; АВТОРАССТАНОВКА ПОДПИСЕЙ БЕЗ ПЕРЕСЕЧЕНИЙ
+;;; ============================================================
+
+(if (not (boundp '*VL:PLACED-BBOXES*)) (setq *VL:PLACED-BBOXES* '()))
+
+(defun vl:estimate-text-width (txt-str height / n)
+  (setq n (strlen txt-str))
+  (* n height 0.62)
+)
+
+(defun vl:bbox-make-centered (cx cy w h)
+  (list
+    (- cx (/ w 2.0))   ; min X
+    (- cy (/ h 2.0))   ; min Y
+    (+ cx (/ w 2.0))   ; max X
+    (+ cy (/ h 2.0))   ; max Y
+  )
+)
+
+(defun vl:bbox-overlap-p (b1 b2)
+  (not (or (< (nth 2 b1) (nth 0 b2))
+           (< (nth 2 b2) (nth 0 b1))
+           (< (nth 3 b1) (nth 1 b2))
+           (< (nth 3 b2) (nth 1 b1))
+      )
+  )
+)
+
+(defun vl:pt-in-bbox-p (pt bbox)
+  (and (>= (car pt)  (nth 0 bbox)) (<= (car pt)  (nth 2 bbox))
+       (>= (cadr pt) (nth 1 bbox)) (<= (cadr pt) (nth 3 bbox)))
+)
+
+(defun vl:cross2d (ox oy ax ay bx by)
+  (- (* (- ax ox) (- by oy)) (* (- ay oy) (- bx ox)))
+)
+
+(defun vl:seg-seg-intersect-p (p1 p2 p3 p4 / d1 d2 d3 d4)
+  (setq d1 (vl:cross2d (car p3) (cadr p3) (car p4) (cadr p4) (car p1) (cadr p1)))
+  (setq d2 (vl:cross2d (car p3) (cadr p3) (car p4) (cadr p4) (car p2) (cadr p2)))
+  (setq d3 (vl:cross2d (car p1) (cadr p1) (car p2) (cadr p2) (car p3) (cadr p3)))
+  (setq d4 (vl:cross2d (car p1) (cadr p1) (car p2) (cadr p2) (car p4) (cadr p4)))
+  (and
+    (or (and (> d1 0) (< d2 0)) (and (< d1 0) (> d2 0)))
+    (or (and (> d3 0) (< d4 0)) (and (< d3 0) (> d4 0)))
+  )
+)
+
+(defun vl:bbox-seg-intersect-p (bbox p1 p2 / minx miny maxx maxy)
+  (setq minx (nth 0 bbox) miny (nth 1 bbox) maxx (nth 2 bbox) maxy (nth 3 bbox))
+  (or
+    (vl:pt-in-bbox-p p1 bbox)
+    (vl:pt-in-bbox-p p2 bbox)
+    (vl:seg-seg-intersect-p p1 p2 (list minx miny) (list maxx miny))
+    (vl:seg-seg-intersect-p p1 p2 (list maxx miny) (list maxx maxy))
+    (vl:seg-seg-intersect-p p1 p2 (list maxx maxy) (list minx maxy))
+    (vl:seg-seg-intersect-p p1 p2 (list minx maxy) (list minx miny))
+  )
+)
+
+;; Тот же тест, что и vl:bbox-seg-intersect-p, но БЕЗ проверки
+;; "конец отрезка внутри бокса" — только реальное пересечение линии
+;; сегмента с гранями бокса. Нужен для двух сегментов, примыкающих
+;; к текущей вершине: то, что сама вершина рядом с боксом подписи —
+;; это не пересечение, а вот если линия сегмента проходит сквозь
+;; бокс — это реальное наложение, и его пропускать нельзя.
+(defun vl:bbox-seg-intersect-line-only-p (bbox p1 p2 / minx miny maxx maxy)
+  (setq minx (nth 0 bbox) miny (nth 1 bbox) maxx (nth 2 bbox) maxy (nth 3 bbox))
+  (or
+    (vl:seg-seg-intersect-p p1 p2 (list minx miny) (list maxx miny))
+    (vl:seg-seg-intersect-p p1 p2 (list maxx miny) (list maxx maxy))
+    (vl:seg-seg-intersect-p p1 p2 (list maxx maxy) (list minx maxy))
+    (vl:seg-seg-intersect-p p1 p2 (list minx maxy) (list minx miny))
+  )
+)
+
+(defun vl:candidate-point (base-pt angle-deg radius / rad)
+  (setq rad (* angle-deg (/ pi 180.0)))
+  (list (+ (car base-pt)  (* radius (cos rad)))
+        (+ (cadr base-pt) (* radius (sin rad)))
+        0.0)
+)
+
+;; Если после теста подписи начнут уходить НЕ наружу от контура,
+;; а внутрь фигуры — поменяйте 1.0 на -1.0 в этой строке.
+(if (not (boundp '*VL:OUTWARD-DIR-FLIP*)) (setq *VL:OUTWARD-DIR-FLIP* 1.0))
+
+;; Знак ориентации обхода полилинии по формуле площади (шнуровка):
+;; >0 — против часовой стрелки, <0 — по часовой стрелке.
+;; Для разомкнутой полилинии однозначного "наружу" не существует —
+;; возвращаем 1.0, направление всё равно будет консистентным.
+(defun vl:polygon-orientation-sign (vertices seg-count closed / area i n p1 p2)
+  (setq area 0.0)
+  (if closed
+    (progn
+      (setq n (1+ seg-count))
+      (setq i 0)
+      (repeat n
+        (setq p1 (nth i vertices))
+        (setq p2 (nth (rem (1+ i) n) vertices))
+        (setq area (+ area (- (* (car p1) (cadr p2)) (* (car p2) (cadr p1)))))
+        (setq i (1+ i))
+      )
+    )
+  )
+  (* (if (>= area 0.0) 1.0 -1.0) *VL:OUTWARD-DIR-FLIP*)
+)
+
+;; Направление "наружу" от контура в данной вершине, в градусах
+;; (0 = вправо, 90 = вверх, стандартная математическая система углов,
+;; та же, что использует vl:candidate-point).
+(defun vl:outward-angle (vertices seg-count vertex-idx closed sign
+                          / prev-pt next-pt v1 nx1 ny1 nx2 ny2 nx ny len)
+  (setq prev-pt nil next-pt nil)
+  (if (or closed (> vertex-idx 0))
+    (setq prev-pt (nth (if (= vertex-idx 0) seg-count (1- vertex-idx)) vertices))
+  )
+  (if (or closed (< vertex-idx seg-count))
+    (setq next-pt (nth (if (= vertex-idx seg-count) 0 (1+ vertex-idx)) vertices))
+  )
+  (setq v1 (nth vertex-idx vertices))
+
+  (cond
+    ((and prev-pt next-pt)
+     (setq nx1 (* sign (- (cadr v1) (cadr prev-pt))))
+     (setq ny1 (* sign (- (car prev-pt) (car v1))))
+     (setq nx2 (* sign (- (cadr next-pt) (cadr v1))))
+     (setq ny2 (* sign (- (car v1) (car next-pt))))
+     (setq nx (+ nx1 nx2))
+     (setq ny (+ ny1 ny2))
+    )
+    (next-pt
+     (setq nx (* sign (- (cadr next-pt) (cadr v1))))
+     (setq ny (* sign (- (car v1) (car next-pt))))
+    )
+    (prev-pt
+     (setq nx (* sign (- (cadr v1) (cadr prev-pt))))
+     (setq ny (* sign (- (car prev-pt) (car v1))))
+    )
+    (T (setq nx 1.0 ny 0.0))
+  )
+
+  (setq len (sqrt (+ (* nx nx) (* ny ny))))
+  (if (< len 1e-9)
+    0.0
+    (* (/ (atan ny nx) pi) 180.0)
+  )
+)
+
+;; Пересортировывает список angles по возрастанию углового расстояния
+;; до target-angle — первым идёт направление, ближе всего к "наружу".
+(defun vl:sort-angles-by-target (angles target-angle / lst a diff)
+  (setq lst '())
+  (foreach a angles
+    (setq diff (- a target-angle))
+    (setq diff (- diff (* 360.0 (fix (/ diff 360.0)))))
+    (if (> diff 180.0) (setq diff (- diff 360.0)))
+    (if (< diff -180.0) (setq diff (+ diff 360.0)))
+    (setq lst (cons (list (abs diff) a) lst))
+  )
+  (setq lst (vl-sort lst '(lambda (x y) (< (car x) (car y)))))
+  (mapcar 'cadr lst)
+)
+
+(defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
+                                 / angles radii found best-pt cand cbbox ok
+                                   seg-i p1 p2)
+  
+  ;; --- Первичная отладка вершины ---
+  (princ (strcat "\nDebug: VertexIdx=" (itoa vertex-idx) 
+                 " Point=" (vl-princ-to-string vertex-pt) 
+                 " Orientation=" (rtos (vl:polygon-orientation-sign vertices seg-count closed))))
+  ;; ---------------------------------------
+
+(setq angles
+    (vl:sort-angles-by-target
+      ;; Измененный порядок: сначала ортогональные направления, 
+      ;; затем диагональные, чтобы избежать пересечений с линиями
+      '(90 270 0 180 45 135 225 315)
+      (vl:outward-angle vertices seg-count vertex-idx closed
+        (vl:polygon-orientation-sign vertices seg-count closed))
+    )
+  )
+
+  (setq radii  (list base-radius (* base-radius 1.5) (* base-radius 2.5) (* base-radius 4.0)))
+  (setq found nil)
+
+  (foreach rad radii
+    (if (not found)
+      (foreach ang angles
+        (if (not found)
+          (progn
+            (setq cand  (vl:candidate-point vertex-pt ang rad))
+            (setq cbbox (vl:bbox-make-centered
+                          (car cand)
+                          (cadr cand)
+                          label-w
+                          label-h
+                        ))
+            (setq ok T)
+
+            ;; 1. Проверка пересечений с уже размещенными рамками
+            (foreach pb *VL:PLACED-BBOXES*
+              (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
+            )
+
+            ;; 2. Проверка пересечений с сегментами полилинии
+            (setq seg-i 0)
+            (repeat seg-count
+              (if ok
+                (progn
+                  (setq p1 (nth seg-i vertices))
+                  (setq p2 (nth (1+ seg-i) vertices))
+                  (if (or (= seg-i (1- vertex-idx)) (= seg-i vertex-idx))
+                    (if (vl:bbox-seg-intersect-line-only-p cbbox p1 p2) (setq ok nil))
+                    (if (vl:bbox-seg-intersect-p cbbox p1 p2) (setq ok nil))
+                  )
+                )
+              )
+              (setq seg-i (1+ seg-i))
+            )
+
+            ;; 3. Проверка замыкающего сегмента (если полилиния замкнута)
+            (if (and ok closed)
+              (progn
+                (setq p1 (nth seg-count vertices))
+                (setq p2 (car vertices))
+                (if (or (= vertex-idx 0) (= vertex-idx seg-count))
+                  (if (vl:bbox-seg-intersect-line-only-p cbbox p1 p2) (setq ok nil))
+                  (if (vl:bbox-seg-intersect-p cbbox p1 p2) (setq ok nil))
+                )
+              )
+            )
+
+            ;; --- Детальная отладка отбракованных углов ---
+            (if (not ok)
+              (princ (strcat "\nDebug: Angle " (rtos ang 2 2) " rejected on radius " (rtos rad 2 2) " for vertex " (itoa vertex-idx)))
+            )
+            ;; ---------------------------------------------
+
+            (if ok
+              (progn (setq best-pt cand) (setq found T))
+            )
+          )
+        )
+      )
+    )
+  )
+
+  (if (not found)
+    (progn
+      (princ (strcat "\nDebug: ALL ANGLES REJECTED for vertex " (itoa vertex-idx) " - forcing default!"))
+      (setq best-pt (vl:candidate-point vertex-pt 0 (car radii)))
+    )
+  )
+
+  (setq *VL:PLACED-BBOXES*
+    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*)
+  )
+  best-pt
+)
+
 (defun vl:create-parallel-dim-with-label
        (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
         / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
@@ -8822,7 +9085,8 @@
 ;;; Запускается через команду AutoCAD: VERTEXLEADERS
 ;;; ============================================================
 (defun c:VERTEXLEADERS (/ sel ename vertices pt-count idx pt
-                          x-coord y-coord coord-text
+                          x-coord y-coord real-x real-y coord-text
+                          label-w label-h vert-pos poly-closed
                           mleader-style-name text-style-name actual-mleader-style
                           template-path export-data
                           txt-height land-length
@@ -8836,6 +9100,11 @@
 
   ;; --- Инициализация ---
   (vl-load-com)
+ 
+  ;; Каждая новая обработка полилинии начинает
+  ;; поиск свободных мест с чистой карты
+  (setq *VL:PLACED-BBOXES* '())
+
   (setq mleader-style-name "Координаты")   ; желаемое имя стиля MLEADER
   (setq text-style-name    "Д-431")        ; имя текстового стиля
   (setq dim-style-name     "ISO-500 пустой COORD") ; желаемое имя размерного стиля
@@ -9027,6 +9296,10 @@
 ;; ============================================================
   ;; ЧАСТЬ 1: координатные выноски и номера
   ;; ============================================================
+  (setq seg-count (1- pt-count))
+  (setq vert-pos 0)
+  (setq poly-closed (vl:polyline-closed-p ename))
+
   (foreach pt vertices
     (princ (strcat "\n  Обработка вершины №" (itoa idx) "..."))
 
@@ -9046,7 +9319,14 @@
       )
     )
     (setq coord-text (strcat "X= " (vl:fmt-coord x-coord) "\\PY= " (vl:fmt-coord y-coord)))
-    (setq pt-land (list (+ real-x land-length) (+ real-y (* txt-height 0.8)) 0.0))
+
+    ;; --- Авторасстановка: ищем свободное место под подпись ---
+    (setq label-w (vl:estimate-text-width (strcat "X= " (vl:fmt-coord x-coord)) txt-height))
+    (setq label-w (max label-w (vl:estimate-text-width (strcat "Y= " (vl:fmt-coord y-coord)) txt-height)))
+    (setq label-h (* txt-height 2.3))
+    (setq pt-land
+      (vl:find-label-placement (list real-x real-y 0.0) label-w label-h vertices seg-count land-length vert-pos poly-closed)
+    )
     (setq pt-text (list (+ (car pt-land) land-length) (cadr pt-land) 0.0))
     (if (= output-mode "Мультивыноска")
       (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
@@ -9061,7 +9341,8 @@
     )
     (vl:create-mtext-masked (list real-x real-y 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
     (setq idx (1+ idx))
-)
+    (setq vert-pos (1+ vert-pos))
+  )
 
   ;; Запоминаем состояние
   (setq *VL:LAST-POLY-ENAME* ename)
@@ -9124,7 +9405,8 @@
   (setq *VL:LAST-VERTEX-NUM* nil)
   (setq *VL:ALL-EXPORT-DATA* '())
   (setq *VL:LAST-POLY-ENAME* nil)
-  (princ "\nСчётчик и накопленные данные сброшены.")
+  (setq *VL:PLACED-BBOXES* '())
+  (princ "\nСчётчик, накопленные данные и карта занятых мест под подписи сброшены.")
   (princ)
 )
 
