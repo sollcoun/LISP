@@ -59,6 +59,8 @@
 (if (not (boundp '*VL:LAST-VERTEX-NUM*)) (setq *VL:LAST-VERTEX-NUM* nil))
 (if (not (boundp '*VL:ALL-EXPORT-DATA*)) (setq *VL:ALL-EXPORT-DATA* '()))
 (if (not (boundp '*VL:LAST-POLY-ENAME*)) (setq *VL:LAST-POLY-ENAME* nil))
+(if (not (boundp '*VL:DEFAULT-NUMBER-MODE*)) (setq *VL:DEFAULT-NUMBER-MODE* "Да"))
+(if (not (boundp '*VL:DEFAULT-DIM-MODE*))    (setq *VL:DEFAULT-DIM-MODE* "Да"))
 
 
 (setq *VL:TEMPLATE-B64*
@@ -8146,7 +8148,7 @@
 
         ;; Синтаксис "путь_к_dwg=имя_блока" — INSERT берёт из внешнего
         ;; DWG именно вложенный блок с таким именем, а не весь чертёж.
-        (command "_.-INSERT" (strcat template-path "=" block-name) "_S" 1.0 "0,0,0" 0.0)
+        (command "_.-INSERT" (strcat block-name "=" template-path) "_S" 1.0 "0,0,0" 0.0)
         ;; Сбрасываем "зависшие" запросы, если -INSERT ждёт ещё ввода
         ;; (например, диалог "Блок уже существует. Переопределить?")
         (while (> (getvar "CMDACTIVE") 0)
@@ -8620,47 +8622,39 @@
 
 (defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
                                  / angles radii found best-pt cand cbbox ok
-                                   seg-i p1 p2)
-  
-  ;; --- Первичная отладка вершины ---
-  (princ (strcat "\nDebug: VertexIdx=" (itoa vertex-idx) 
-                 " Point=" (vl-princ-to-string vertex-pt) 
-                 " Orientation=" (rtos (vl:polygon-orientation-sign vertices seg-count closed))))
-  ;; ---------------------------------------
+                                   seg-i p1 p2 outward-ang sorted-angles)
 
-(setq angles
-    (vl:sort-angles-by-target
-      ;; Измененный порядок: сначала ортогональные направления, 
-      ;; затем диагональные, чтобы избежать пересечений с линиями
-      '(90 270 0 180 45 135 225 315)
-      (vl:outward-angle vertices seg-count vertex-idx closed
-        (vl:polygon-orientation-sign vertices seg-count closed))
-    )
-  )
+  (setq outward-ang (vl:outward-angle vertices seg-count vertex-idx closed
+                      (vl:polygon-orientation-sign vertices seg-count closed)))
+  (if (null outward-ang) (setq outward-ang 0.0))
 
-  (setq radii  (list base-radius (* base-radius 1.5) (* base-radius 2.5) (* base-radius 4.0)))
+  (princ (strcat "\nDebug Vertex " (itoa vertex-idx) " outward=" (rtos outward-ang 2 1)))
+
+  (setq angles '(0 22.5 45 67.5 90 112.5 135 157.5 180 202.5 225 247.5 270 292.5 315 337.5))
+  (setq sorted-angles (vl:sort-angles-by-target angles outward-ang))
+
+  ;; Ещё большие расстояния
+  (setq radii (list (* base-radius 3.0) 
+                    (* base-radius 5.0) 
+                    (* base-radius 8.0) 
+                    (* base-radius 12.0) 
+                    (* base-radius 18.0)))
+
   (setq found nil)
 
   (foreach rad radii
     (if (not found)
-      (foreach ang angles
+      (foreach ang sorted-angles
         (if (not found)
           (progn
             (setq cand  (vl:candidate-point vertex-pt ang rad))
-            (setq cbbox (vl:bbox-make-centered
-                          (car cand)
-                          (cadr cand)
-                          label-w
-                          label-h
-                        ))
+            (setq cbbox (vl:bbox-make-centered (car cand) (cadr cand) label-w label-h))
             (setq ok T)
 
-            ;; 1. Проверка пересечений с уже размещенными рамками
             (foreach pb *VL:PLACED-BBOXES*
               (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
             )
 
-            ;; 2. Проверка пересечений с сегментами полилинии
             (setq seg-i 0)
             (repeat seg-count
               (if ok
@@ -8676,7 +8670,6 @@
               (setq seg-i (1+ seg-i))
             )
 
-            ;; 3. Проверка замыкающего сегмента (если полилиния замкнута)
             (if (and ok closed)
               (progn
                 (setq p1 (nth seg-count vertices))
@@ -8688,14 +8681,12 @@
               )
             )
 
-            ;; --- Детальная отладка отбракованных углов ---
-            (if (not ok)
-              (princ (strcat "\nDebug: Angle " (rtos ang 2 2) " rejected on radius " (rtos rad 2 2) " for vertex " (itoa vertex-idx)))
-            )
-            ;; ---------------------------------------------
-
             (if ok
-              (progn (setq best-pt cand) (setq found T))
+              (progn 
+                (setq best-pt cand) 
+                (setq found T)
+                (princ (strcat "  ? angle " (rtos ang 2 1) ", rad " (rtos rad 2 1)))
+              )
             )
           )
         )
@@ -8705,123 +8696,18 @@
 
   (if (not found)
     (progn
-      (princ (strcat "\nDebug: ALL ANGLES REJECTED for vertex " (itoa vertex-idx) " - forcing default!"))
-      (setq best-pt (vl:candidate-point vertex-pt 0 (car radii)))
+      (princ "\n  ALL ANGLES REJECTED ? fallback")
+      (setq best-pt (vl:candidate-point vertex-pt (if outward-ang outward-ang 0) (* base-radius 12.0)))
     )
   )
 
   (setq *VL:PLACED-BBOXES*
-    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*)
-  )
+    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*))
+
   best-pt
 )
 
-(defun vl:create-parallel-dim-with-label
-       (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
-        / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
-          dim-obj length-str char-count required-width label-ename)
-
-  (vl-load-com)
-  (setq acadobj (vlax-get-acad-object))
-  (setq mspace  (vla-get-modelspace (vla-get-activedocument acadobj)))
-
-  ;; --- Вектор сегмента и его длина ---
-  (setq dx (- (car pt2) (car pt1)))
-  (setq dy (- (cadr pt2) (cadr pt1)))
-  (setq seg-len (sqrt (+ (* dx dx) (* dy dy))))
-
-  ;; --- Перпендикуляр к сегменту (нормированный) ---
-  (if (> seg-len 1e-9)
-    (progn
-      (setq perp-x (/ (- dy) seg-len))
-      (setq perp-y (/ dx seg-len))
-      ;; Если перпендикуляр направлен вверх — разворачиваем на 180°,
-      ;; чтобы линия размера всегда была ПОД полилинией
-      (if (> perp-y 0.0)
-        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
-      )
-    )
-    ;; Вырожденный (нулевой) сегмент — перпендикуляр "вниз" по умолчанию
-    (progn (setq perp-x 0.0) (setq perp-y -1.0))
-  )
-
-  ;; --- Средняя точка сегмента ---
-  (setq mid-pt
-    (list (/ (+ (car pt1) (car pt2)) 2.0)
-          (/ (+ (cadr pt1) (cadr pt2)) 2.0)
-          0.0)
-  )
-
-  ;; --- Точка, задающая положение линии размера (смещена вниз) ---
-  (setq dim-pt
-    (list
-      (+ (car mid-pt) (* perp-x offset-dist))
-      (+ (cadr mid-pt) (* perp-y offset-dist))
-      0.0
-    )
-  )
-
-  ;; --- Создаём параллельный (aligned) размер ---
-  (setq dim-obj
-    (vla-AddDimAligned
-      mspace
-      (vlax-3d-point pt1)
-      (vlax-3d-point pt2)
-      (vlax-3d-point dim-pt)
-    )
-  )
-
-  (if (null dim-obj)
-    (progn
-      (princ "\n  ОШИБКА: не удалось создать параллельный размер.")
-      nil
-    )
-    (progn
-      ;; --- Назначаем размерный стиль «ISO-500 пустой», импортированный
-      ;;     из шаблона проекта: он уже содержит нужное оформление
-      ;;     (без стрелок, без выносных линий, текстовый стиль Д-431,
-      ;;     высота, отступ и т.д.) — вручную ничего задавать не нужно ---
-      (vl-catch-all-apply '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
-
-      ;; --- Формируем строку значения длины (только для оценки длины) ---
-      (setq length-str (vl:fmt-length seg-len))
-      (setq char-count (strlen length-str))
-
-      ;; --- Оцениваем, помещается ли текст на линии размера ---
-      ;; Приблизительная ширина одного символа ~ 0.6 * высота текста
-      (setq required-width (* char-count txt-height 0.6))
-
-      (if (>= seg-len required-width)
-        ;; --- Сегмент достаточно длинный: оставляем встроенный текст
-        ;;     размера как есть — заливка (в т.ч. «Фон») берётся из
-        ;;     назначенного размерного стиля, вручную не переопределяем ---
-        (progn
-          (setq label-ename (vlax-vla-object->ename dim-obj))
-        )
-        ;; --- Сегмент короче требуемой ширины: скрываем встроенный текст
-        ;;     размера (override на пробел) и выносим значение мультивыноской ---
-        (progn
-          (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
-          (princ (strcat "\n  Сегмент короче подписи (" length-str
-                         ") — значение вынесено мультивыноской."))
-          (setq label-ename
-            (vl:create-mleader
-              mid-pt                                             ; Острие на полилинии
-              (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка полки
-              (list (+ (car mid-pt) (* txt-height 2.0)) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка текста
-              length-str
-              mleader-style-name
-              (* txt-height 1.5)
-            )
-          )
-        )
-      )
-      label-ename
-    )
-  )
-)
-
-(defun vl:insert-coord-block (pt-vertex block-name x-str y-str scale txt-height
+(defun vl:insert-coord-block (pt-vertex block-name x-str y-str scale txt-height rot-ang
                                / acadobj mspace blk-ref atts att tag readback)
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
@@ -8831,7 +8717,7 @@
   (setq blk-ref
     (vl-catch-all-apply
       'vla-InsertBlock
-      (list mspace (vlax-3d-point pt-vertex) block-name scale scale scale 0.0)
+      (list mspace (vlax-3d-point pt-vertex) block-name scale scale scale rot-ang)
     )
   )
 
@@ -8870,11 +8756,12 @@
                (princ (strcat "\n    [диагностика] тег «" tag
                               "» не распознан как X или Y — атрибут не обновлён.")))
             )
-            (if (> scale 1e-9)
+             (if (> scale 1e-9)
               (vl-catch-all-apply
                 '(lambda () (vla-put-Height att (/ txt-height scale)))
               )
             )
+            (vl-catch-all-apply '(lambda () (vla-put-Rotation att 0.0)))
             ;; --- Проверяем, "прилипло" ли наше значение (не Field ли это) ---
             (setq readback (vl-catch-all-apply 'vla-get-TextString (list att)))
             (if (and (not (vl-catch-all-error-p readback))
@@ -9096,7 +8983,8 @@
                           dim-offset dim-text-gap seg-count seg-idx seg-pt1 seg-pt2
                           dim-style-name actual-dim-style-name
                           old-osmode old-cmdecho start-choice old-error-handler
-                          output-mode coord-block-name block-scale)
+                          output-mode coord-block-name block-scale
+                          number-mode dim-mode)
 
   ;; --- Инициализация ---
   (vl-load-com)
@@ -9223,6 +9111,10 @@
   (setq pt-count (length vertices))
   (princ (strcat "\n  Найдено вершин: " (itoa pt-count)))
 
+
+(setq number-mode *VL:DEFAULT-NUMBER-MODE*)
+  (setq dim-mode     *VL:DEFAULT-DIM-MODE*)
+
   ;; --- Способ вывода координат: мультивыноска или блок ---
   (initget "Мультивыноска Блок")
   (setq output-mode
@@ -9256,31 +9148,34 @@
   ;; начинаем с 1 без вопросов. Если в сеансе уже была обработана
   ;; хотя бы одна полилиния — спрашиваем пользователя явно.
   ;; ------------------------------------------------------------
-  (if (and *VL:LAST-VERTEX-NUM* (> *VL:LAST-VERTEX-NUM* 0))
-    (progn
-      (initget "Продолжить Заново")
-      (setq start-choice
-        (getkword
-          (strcat
-            "\nПродолжить нумерацию с №" (itoa (1+ *VL:LAST-VERTEX-NUM*))
-            " или начать заново с №1? [Продолжить/Заново] <Продолжить>: "
+(if (= number-mode "Нет")
+    (setq idx 1)
+    (if (and *VL:LAST-VERTEX-NUM* (> *VL:LAST-VERTEX-NUM* 0))
+      (progn
+        (initget "Продолжить Заново")
+        (setq start-choice
+          (getkword
+            (strcat
+              "\nПродолжить нумерацию с №" (itoa (1+ *VL:LAST-VERTEX-NUM*))
+              " или начать заново с №1? [Продолжить/Заново] <Продолжить>: "
+            )
+          )
+        )
+        (if (or (null start-choice) (= start-choice "Продолжить"))
+          (setq idx (1+ *VL:LAST-VERTEX-NUM*))
+          (progn
+            (setq idx 1)
+            ;; Если пользователь решил начать нумерацию заново, старые
+            ;; накопленные данные экспорта (с прежними номерами вершин)
+            ;; тоже сбрасываем - иначе в таблице появятся дублирующиеся
+            ;; номера, указывающие на разные координаты.
+            (setq *VL:ALL-EXPORT-DATA* nil)
           )
         )
       )
-      (if (or (null start-choice) (= start-choice "Продолжить"))
-        (setq idx (1+ *VL:LAST-VERTEX-NUM*))
-        (progn
-          (setq idx 1)
-          ;; Если пользователь решил начать нумерацию заново, старые
-          ;; накопленные данные экспорта (с прежними номерами вершин)
-          ;; тоже сбрасываем - иначе в таблице появятся дублирующиеся
-          ;; номера, указывающие на разные координаты.
-          (setq *VL:ALL-EXPORT-DATA* nil)
-        )
-      )
+      ;; Первая полилиния в сеансе - нумерация всегда с 1
+      (setq idx 1)
     )
-    ;; Первая полилиния в сеансе - нумерация всегда с 1
-    (setq idx 1)
   )
   (princ (strcat "\n  Нумерация вершин начнётся с №" (itoa idx) "."))
 
@@ -9329,57 +9224,67 @@
     )
     (setq pt-text (list (+ (car pt-land) land-length) (cadr pt-land) 0.0))
     (if (= output-mode "Мультивыноска")
-      (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
-      (vl:insert-coord-block
-        pt-land ; точка вставки блока = реальная точка вершины полилинии
-        coord-block-name
-        (vl:fmt-coord x-coord)     ; текст атрибута X = "геодезическая" вертикаль
-        (vl:fmt-coord y-coord)     ; текст атрибута Y = "геодезическая" горизонталь
-        block-scale
-        txt-height
+          (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
+(vl:insert-coord-block
+            (list real-x real-y 0.0)
+            coord-block-name
+            (vl:fmt-coord x-coord)
+            (vl:fmt-coord y-coord)
+            block-scale
+            txt-height
+            0.0
+          )
       )
+    
+ (if (= number-mode "Да")
+      (vl:create-mtext-masked (list real-x real-y 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
     )
-    (vl:create-mtext-masked (list real-x real-y 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
     (setq idx (1+ idx))
     (setq vert-pos (1+ vert-pos))
   )
-
   ;; Запоминаем состояние
   (setq *VL:LAST-POLY-ENAME* ename)
   (setq *VL:LAST-VERTEX-NUM* (1- idx))
 
 ;; ============================================================
-  ;; ЧАСТЬ 2: Построение размеров по каждому сегменту
+  ;; ЧАСТЬ 2: простановка размеров по сторонам полигона
   ;; ============================================================
-  (princ "\n\nПроставляю размеры по сегментам...")
   (setq seg-count (1- pt-count))
   (setq seg-idx 0)
 
-  (repeat seg-count
-    (vl:create-parallel-dim-with-label
-      (nth seg-idx vertices)
-      (nth (1+ seg-idx) vertices)
-      dim-offset
-      1.0
-      actual-dim-style-name
-      actual-mleader-style
-      dim-text-gap
-    )
-    (setq seg-idx (1+ seg-idx))
-  )
+  (if (= dim-mode "Да")
+    (progn
+      (princ "\n\nПростановка размеров по сегментам...")
+      (setq seg-count (1- pt-count))
+      (setq seg-idx 0)
 
-  (if (vl:polyline-closed-p ename)
-    (vl:create-parallel-dim-with-label
-      (last vertices)
-      (car vertices)
-      dim-offset
-      1.0
-      actual-dim-style-name
-      actual-mleader-style
-      dim-text-gap
+      (repeat seg-count
+        (vl:create-parallel-dim-with-label
+          (nth seg-idx vertices)
+          (nth (1+ seg-idx) vertices)
+          dim-offset
+          1.0
+          actual-dim-style-name
+          actual-mleader-style
+          dim-text-gap
+        )
+        (setq seg-idx (1+ seg-idx))
+      )
+
+      (if (vl:polyline-closed-p ename)
+        (vl:create-parallel-dim-with-label
+          (last vertices)
+          (car vertices)
+          dim-offset
+          1.0
+          actual-dim-style-name
+          actual-mleader-style
+          dim-text-gap
+        )
+      )
+      (princ "\nРазмеры проставлены.")
     )
   )
-  (princ "\nРазмеры построены.")
 
   ;; --- ЭКСПОРТ ВСЕХ ДАННЫХ ---
   (vl:offer-export *VL:ALL-EXPORT-DATA*)
@@ -9410,6 +9315,38 @@
   (princ)
 )
 
+;;; ============================================================
+;;; КОМАНДА: VLSETTINGS
+;;; Задаёт значения по умолчанию для вопросов о номерах вершин
+;;; и размерах сторон в команде VERTEXLEADERS. Действует до конца
+;;; текущего сеанса AutoCAD (сбрасывается при перезапуске).
+;;; ============================================================
+(defun c:VLSETTINGS ( / choice)
+  (princ "\n=== Настройки VERTEXLEADERS по умолчанию ===")
+
+  (initget "Да Нет")
+  (setq choice
+    (getkword
+      (strcat "\nПроставлять номера вершин по умолчанию? [Да/Нет] <"
+              *VL:DEFAULT-NUMBER-MODE* ">: ")
+    )
+  )
+  (if choice (setq *VL:DEFAULT-NUMBER-MODE* choice))
+
+  (initget "Да Нет")
+  (setq choice
+    (getkword
+      (strcat "\nПроставлять размеры сторон по умолчанию? [Да/Нет] <"
+              *VL:DEFAULT-DIM-MODE* ">: ")
+    )
+  )
+  (if choice (setq *VL:DEFAULT-DIM-MODE* choice))
+
+  (princ (strcat "\n  Сохранено: номера вершин = " *VL:DEFAULT-NUMBER-MODE*
+                 ", размеры = " *VL:DEFAULT-DIM-MODE* "."))
+  (princ "\n  Настройки действуют до конца текущего сеанса AutoCAD.")
+  (princ)
+)
 
 ;;; ============================================================
 ;;; ДОПОЛНИТЕЛЬНАЯ УТИЛИТА: CHECKSTYLE
