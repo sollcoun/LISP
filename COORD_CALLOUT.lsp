@@ -8539,8 +8539,7 @@
 
 ;; Если после теста подписи начнут уходить НЕ наружу от контура,
 ;; а внутрь фигуры — поменяйте 1.0 на -1.0 в этой строке.
-(if (not (boundp '*VL:OUTWARD-DIR-FLIP*)) (setq *VL:OUTWARD-DIR-FLIP* -1.0))
-(setq *VL:OUTWARD-DIR-FLIP* -1.0)
+(if (not (boundp '*VL:OUTWARD-DIR-FLIP*)) (setq *VL:OUTWARD-DIR-FLIP* 1.0))
 
 ;; Знак ориентации обхода полилинии по формуле площади (шнуровка):
 ;; >0 — против часовой стрелки, <0 — по часовой стрелке.
@@ -8621,39 +8620,47 @@
 
 (defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
                                  / angles radii found best-pt cand cbbox ok
-                                   seg-i p1 p2 outward-ang sorted-angles)
+                                   seg-i p1 p2)
+  
+  ;; --- Первичная отладка вершины ---
+  (princ (strcat "\nDebug: VertexIdx=" (itoa vertex-idx) 
+                 " Point=" (vl-princ-to-string vertex-pt) 
+                 " Orientation=" (rtos (vl:polygon-orientation-sign vertices seg-count closed))))
+  ;; ---------------------------------------
 
-  (setq outward-ang (vl:outward-angle vertices seg-count vertex-idx closed
-                      (vl:polygon-orientation-sign vertices seg-count closed)))
-  (if (null outward-ang) (setq outward-ang 0.0))
+(setq angles
+    (vl:sort-angles-by-target
+      ;; Измененный порядок: сначала ортогональные направления, 
+      ;; затем диагональные, чтобы избежать пересечений с линиями
+      '(90 270 0 180 45 135 225 315)
+      (vl:outward-angle vertices seg-count vertex-idx closed
+        (vl:polygon-orientation-sign vertices seg-count closed))
+    )
+  )
 
-  (princ (strcat "\nDebug Vertex " (itoa vertex-idx) " outward=" (rtos outward-ang 2 1)))
-
-  (setq angles '(0 22.5 45 67.5 90 112.5 135 157.5 180 202.5 225 247.5 270 292.5 315 337.5))
-  (setq sorted-angles (vl:sort-angles-by-target angles outward-ang))
-
-  ;; Ещё большие расстояния
-  (setq radii (list (* base-radius 3.0) 
-                    (* base-radius 5.0) 
-                    (* base-radius 8.0) 
-                    (* base-radius 12.0) 
-                    (* base-radius 18.0)))
-
+  (setq radii  (list base-radius (* base-radius 1.5) (* base-radius 2.5) (* base-radius 4.0)))
   (setq found nil)
 
   (foreach rad radii
     (if (not found)
-      (foreach ang sorted-angles
+      (foreach ang angles
         (if (not found)
           (progn
             (setq cand  (vl:candidate-point vertex-pt ang rad))
-            (setq cbbox (vl:bbox-make-centered (car cand) (cadr cand) label-w label-h))
+            (setq cbbox (vl:bbox-make-centered
+                          (car cand)
+                          (cadr cand)
+                          label-w
+                          label-h
+                        ))
             (setq ok T)
 
+            ;; 1. Проверка пересечений с уже размещенными рамками
             (foreach pb *VL:PLACED-BBOXES*
               (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
             )
 
+            ;; 2. Проверка пересечений с сегментами полилинии
             (setq seg-i 0)
             (repeat seg-count
               (if ok
@@ -8669,6 +8676,7 @@
               (setq seg-i (1+ seg-i))
             )
 
+            ;; 3. Проверка замыкающего сегмента (если полилиния замкнута)
             (if (and ok closed)
               (progn
                 (setq p1 (nth seg-count vertices))
@@ -8680,12 +8688,14 @@
               )
             )
 
+            ;; --- Детальная отладка отбракованных углов ---
+            (if (not ok)
+              (princ (strcat "\nDebug: Angle " (rtos ang 2 2) " rejected on radius " (rtos rad 2 2) " for vertex " (itoa vertex-idx)))
+            )
+            ;; ---------------------------------------------
+
             (if ok
-              (progn 
-                (setq best-pt cand) 
-                (setq found T)
-                (princ (strcat "  ? angle " (rtos ang 2 1) ", rad " (rtos rad 2 1)))
-              )
+              (progn (setq best-pt cand) (setq found T))
             )
           )
         )
@@ -8695,14 +8705,14 @@
 
   (if (not found)
     (progn
-      (princ "\n  ALL ANGLES REJECTED ? fallback")
-      (setq best-pt (vl:candidate-point vertex-pt (if outward-ang outward-ang 0) (* base-radius 12.0)))
+      (princ (strcat "\nDebug: ALL ANGLES REJECTED for vertex " (itoa vertex-idx) " - forcing default!"))
+      (setq best-pt (vl:candidate-point vertex-pt 0 (car radii)))
     )
   )
 
   (setq *VL:PLACED-BBOXES*
-    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*))
-
+    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*)
+  )
   best-pt
 )
 
@@ -9321,7 +9331,7 @@
     (if (= output-mode "Мультивыноска")
       (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
       (vl:insert-coord-block
-        (list real-x real-y 0.0)   ; точка вставки блока = реальная точка вершины полилинии
+        pt-land ; точка вставки блока = реальная точка вершины полилинии
         coord-block-name
         (vl:fmt-coord x-coord)     ; текст атрибута X = "геодезическая" вертикаль
         (vl:fmt-coord y-coord)     ; текст атрибута Y = "геодезическая" горизонталь
