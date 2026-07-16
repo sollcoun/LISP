@@ -8256,6 +8256,12 @@
         '(lambda ()
            (vla-put-TextBackgroundFill mleader :vlax-true)
            (vla-put-TextBackgroundScaleFactor mleader 1.05)
+(princ
+  (strcat
+    "\nScale = "
+    (rtos (vla-get-BackgroundScaleFactor mt) 2 2)
+  )
+)
            (vla-put-TextBackgroundColor mleader 254)
         )
       )
@@ -8276,34 +8282,75 @@
 ;;;   just       — выравнивание (AttachmentPoint)
 ;;;   style-name — имя текстового стиля
 ;;; ------------------------------------------------------------
-(defun vl:create-mtext-masked (ins-pt txt-str height width just style-name
-                                / mspace doc mt)
+
+(defun vl:set-mtext-mask-scale (ename scale / elst)
+  (setq elst (entget ename '("*")))
+
+  (if (assoc 45 elst)
+    (setq elst
+          (subst
+            (cons 45 (float scale))
+            (assoc 45 elst)
+            elst))
+    (setq elst
+          (append elst
+                  (list (cons 45 (float scale)))))
+  )
+
+  (entmod elst)
+  (entupd ename)
+  ename
+)
+
+(defun vl:create-mtext-masked
+       (ins-pt txt-str height width just style-name
+        / doc mspace mt en)
+
   (vl-load-com)
-  (setq doc    (vla-get-activedocument (vlax-get-acad-object)))
-  (setq mspace (vla-get-modelspace doc))
+
+  (setq doc    (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (setq mspace (vla-get-ModelSpace doc))
 
   (setq mt
-    (vla-AddMText mspace (vlax-3d-point ins-pt) (float width) txt-str)
-  )
+        (vla-AddMText
+          mspace
+          (vlax-3d-point ins-pt)
+          (float width)
+          txt-str))
+
   (if mt
     (progn
+
+      ;; Высота
       (vla-put-Height mt (float height))
+
+      ;; Стиль
       (vl-catch-all-apply
-        '(lambda () (vla-put-StyleName mt style-name))
-      )
+        '(lambda ()
+           (vla-put-StyleName mt style-name)))
+
+      ;; Выравнивание
       (vla-put-AttachmentPoint mt just)
+
+      ;; Маска
       (vl-catch-all-apply
         '(lambda ()
            (vla-put-BackgroundFill mt :vlax-true)
-           (vla-put-BackgroundScaleFactor mt 1.05)
            (vla-put-BackgroundColor mt 254)
-        )
+         )
       )
-      (vlax-vla-object->ename mt)
+
+      ;; Получаем имя объекта
+      (setq en (vlax-vla-object->ename mt))
+
+      ;; Принудительно меняем DXF код 45
+      (vl:set-mtext-mask-scale en 1.05)
+
+      en
     )
-    nil
   )
 )
+
 
 ;;; ------------------------------------------------------------
 ;;; Вставляет блок с атрибутами координат — альтернатива MLEADER.
@@ -8990,110 +9037,111 @@
 ;;; отрезок нулевой длины или размер создать не удалось.
 ;;; ------------------------------------------------------------
 (defun vl:create-parallel-dim-with-label
-       (pt1 pt2 dim-offset txt-scale dim-style-name mleader-style-name text-gap
-        / acadobj doc mspace p1 p2 real-dist seg-ang perp-ang
-          mid-pt cand1-pt cand2-pt dim-line-pt dim-obj dim-ename label-txt text-pt)
+       (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
+        / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
+          dim-obj length-str char-count required-width label-ename)
 
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
-  (setq doc     (vla-get-activedocument acadobj))
-  (setq mspace  (vla-get-modelspace doc))
+  (setq mspace  (vla-get-modelspace (vla-get-activedocument acadobj)))
 
-  (setq p1 (list (float (car pt1)) (float (cadr pt1)) 0.0))
-  (setq p2 (list (float (car pt2)) (float (cadr pt2)) 0.0))
+  ;; --- Вектор сегмента и его длина ---
+  (setq dx (- (car pt2) (car pt1)))
+  (setq dy (- (cadr pt2) (cadr pt1)))
+  (setq seg-len (sqrt (+ (* dx dx) (* dy dy))))
 
-  (setq real-dist (distance p1 p2))
-  (setq dim-ename nil)
-
-  (if (< real-dist 1e-6)
-    (princ "\n  Предупреждение: сегмент нулевой длины — размер пропущен.")
+  ;; --- Перпендикуляр к сегменту (нормированный) ---
+  (if (> seg-len 1e-9)
     (progn
-      (setq seg-ang  (angle p1 p2))
-
-      (setq mid-pt
-        (list (/ (+ (car p1) (car p2)) 2.0)
-              (/ (+ (cadr p1) (cadr p2)) 2.0)
-              0.0
-        )
-      )
-
-      ;; --- выбираем ту из двух перпендикулярных сторон, которая
-      ;;     смещает линию размера ВНИЗ (под полилинию), независимо
-      ;;     от направления обхода сегмента ---
-      (setq cand1-pt (polar mid-pt (+ seg-ang (/ pi 2.0)) dim-offset))
-      (setq cand2-pt (polar mid-pt (- seg-ang (/ pi 2.0)) dim-offset))
-
-      (if (<= (cadr cand1-pt) (cadr cand2-pt))
-        (progn
-          (setq perp-ang (+ seg-ang (/ pi 2.0)))
-          (setq dim-line-pt cand1-pt)
-        )
-        (progn
-          (setq perp-ang (- seg-ang (/ pi 2.0)))
-          (setq dim-line-pt cand2-pt)
-        )
-      )
-
-      ;; --- создаём параллельный (aligned) размер через ActiveX ---
-      (setq dim-obj
-        (vl-catch-all-apply
-          'vla-AddDimAligned
-          (list mspace
-                (vlax-3d-point p1)
-                (vlax-3d-point p2)
-                (vlax-3d-point dim-line-pt)
-          )
-        )
-      )
-
-      (if (or (null dim-obj) (vl-catch-all-error-p dim-obj))
-        (princ
-          (strcat "\n  ОШИБКА: не удалось создать размер"
-                  (if (vl-catch-all-error-p dim-obj)
-                    (strcat " (" (vl-catch-all-error-message dim-obj) ")")
-                    ""
-                  )
-          )
-        )
-        (progn
-          ;; --- назначаем размерный стиль, если он существует ---
-          (if (and dim-style-name
-                   (/= dim-style-name "")
-                   (vl:dimstyle-exists-p dim-style-name)
-              )
-            (vl-catch-all-apply
-              '(lambda () (vla-put-StyleName dim-obj dim-style-name))
-            )
-          )
-
-          ;; --- высота текста размера ---
-          (if (and txt-scale (> txt-scale 0.0))
-            (vl-catch-all-apply
-              '(lambda () (vla-put-TextHeight dim-obj txt-scale))
-            )
-          )
-
-          ;; --- подпись: форматированная длина отрезка вместо
-          ;;     "сырого" измерения AutoCAD ---
-          (setq label-txt (vl:fmt-length real-dist))
-          (vl-catch-all-apply
-            '(lambda () (vla-put-TextOverride dim-obj label-txt))
-          )
-
-          ;; --- дополнительно отодвигаем подпись от линии размера
-          ;;     на text-gap (по тому же перпендикуляру) ---
-          (setq text-pt (polar dim-line-pt perp-ang text-gap))
-          (vl-catch-all-apply
-            '(lambda () (vla-put-TextPosition dim-obj (vlax-3d-point text-pt)))
-          )
-
-          (setq dim-ename (vlax-vla-object->ename dim-obj))
-        )
+      (setq perp-x (/ (- dy) seg-len))
+      (setq perp-y (/ dx seg-len))
+      ;; Если перпендикуляр направлен вверх — разворачиваем на 180°,
+      ;; чтобы линия размера всегда была ПОД полилинией
+      (if (> perp-y 0.0)
+        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
       )
     )
+    ;; Вырожденный (нулевой) сегмент — перпендикуляр "вниз" по умолчанию
+    (progn (setq perp-x 0.0) (setq perp-y -1.0))
   )
-  dim-ename
+
+  ;; --- Средняя точка сегмента ---
+  (setq mid-pt
+    (list (/ (+ (car pt1) (car pt2)) 2.0)
+          (/ (+ (cadr pt1) (cadr pt2)) 2.0)
+          0.0)
+  )
+
+  ;; --- Точка, задающая положение линии размера (смещена вниз) ---
+  (setq dim-pt
+    (list
+      (+ (car mid-pt) (* perp-x offset-dist))
+      (+ (cadr mid-pt) (* perp-y offset-dist))
+      0.0
+    )
+  )
+
+  ;; --- Создаём параллельный (aligned) размер ---
+  (setq dim-obj
+    (vla-AddDimAligned
+      mspace
+      (vlax-3d-point pt1)
+      (vlax-3d-point pt2)
+      (vlax-3d-point dim-pt)
+    )
+  )
+
+  (if (null dim-obj)
+    (progn
+      (princ "\n  ОШИБКА: не удалось создать параллельный размер.")
+      nil
+    )
+    (progn
+      ;; --- Назначаем размерный стиль «ISO-500 пустой», импортированный
+      ;;     из шаблона проекта: он уже содержит нужное оформление
+      ;;     (без стрелок, без выносных линий, текстовый стиль Д-431,
+      ;;     высота, отступ и т.д.) — вручную ничего задавать не нужно ---
+      (vl-catch-all-apply '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
+
+      ;; --- Формируем строку значения длины (только для оценки длины) ---
+      (setq length-str (vl:fmt-length seg-len))
+      (setq char-count (strlen length-str))
+
+      ;; --- Оцениваем, помещается ли текст на линии размера ---
+      ;; Приблизительная ширина одного символа ~ 0.6 * высота текста
+      (setq required-width (* char-count txt-height 0.6))
+
+      (if (>= seg-len required-width)
+        ;; --- Сегмент достаточно длинный: оставляем встроенный текст
+        ;;     размера как есть — заливка (в т.ч. «Фон») берётся из
+        ;;     назначенного размерного стиля, вручную не переопределяем ---
+        (progn
+          (setq label-ename (vlax-vla-object->ename dim-obj))
+        )
+        ;; --- Сегмент короче требуемой ширины: скрываем встроенный текст
+        ;;     размера (override на пробел) и выносим значение мультивыноской ---
+        (progn
+          (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
+          (princ (strcat "\n  Сегмент короче подписи (" length-str
+                         ") — значение вынесено мультивыноской."))
+          (setq label-ename
+            (vl:create-mleader
+              mid-pt                                             ; Острие на полилинии
+              (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка полки
+              (list (+ (car mid-pt) (* txt-height 2.0)) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка текста
+              length-str
+              mleader-style-name
+              (* txt-height 1.5)
+            )
+          )
+        )
+      )
+      label-ename
+    )
+  )
 )
+
+
 
 ;;; ============================================================
 ;;; ГЛАВНАЯ КОМАНДА: VERTEXLEADERS
@@ -9478,6 +9526,18 @@
   (vl-load-com)
   (vl:ensure-text-style text-style-name)
   (vl:ensure-mleader-style-from-template template-path mleader-style-name)
+  (princ)
+)
+
+(defun c:MTTEST (/ e)
+  (if (setq e (car (entsel "\nВыберите MText: ")))
+    (progn
+      (setq e (entget e '("*")))
+      (foreach x e
+        (print x)
+      )
+    )
+  )
   (princ)
 )
 
