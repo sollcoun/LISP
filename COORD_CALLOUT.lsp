@@ -8967,6 +8967,134 @@
   )
 )
 
+;;; ------------------------------------------------------------
+;;; —оздаЄт параллельный (aligned) размер между двум€ точками
+;;; с подписью Ч фактической длиной отрезка, отформатированной
+;;; через vl:fmt-length (а не "сырым" замером AutoCAD).
+;;;
+;;; јргументы:
+;;;   pt1, pt2            Ч начальна€ и конечна€ точки отрезка
+;;;   dim-offset          Ч рассто€ние от отрезка до линии размера
+;;;   txt-scale           Ч высота текста размера
+;;;   dim-style-name      Ч им€ размерного стил€ (если существует Ч
+;;;                         назначаетс€ размеру; иначе используетс€
+;;;                         текущий стиль чертежа)
+;;;   mleader-style-name  Ч им€ стил€ мультивыноски (передаЄтс€ дл€
+;;;                         единообрази€ сигнатуры/логировани€;
+;;;                         на сам размер не вли€ет, т.к. размер Ч
+;;;                         не MLEADER-объект)
+;;;   text-gap            Ч дополнительный отступ подписи от линии
+;;;                         размера (по перпендикул€ру к отрезку)
+;;;
+;;; ¬озвращает: entity name созданного размера, либо nil, если
+;;; отрезок нулевой длины или размер создать не удалось.
+;;; ------------------------------------------------------------
+(defun vl:create-parallel-dim-with-label
+       (pt1 pt2 dim-offset txt-scale dim-style-name mleader-style-name text-gap
+        / acadobj doc mspace p1 p2 real-dist seg-ang perp-ang
+          mid-pt cand1-pt cand2-pt dim-line-pt dim-obj dim-ename label-txt text-pt)
+
+  (vl-load-com)
+  (setq acadobj (vlax-get-acad-object))
+  (setq doc     (vla-get-activedocument acadobj))
+  (setq mspace  (vla-get-modelspace doc))
+
+  (setq p1 (list (float (car pt1)) (float (cadr pt1)) 0.0))
+  (setq p2 (list (float (car pt2)) (float (cadr pt2)) 0.0))
+
+  (setq real-dist (distance p1 p2))
+  (setq dim-ename nil)
+
+  (if (< real-dist 1e-6)
+    (princ "\n  ѕредупреждение: сегмент нулевой длины Ч размер пропущен.")
+    (progn
+      (setq seg-ang  (angle p1 p2))
+
+      (setq mid-pt
+        (list (/ (+ (car p1) (car p2)) 2.0)
+              (/ (+ (cadr p1) (cadr p2)) 2.0)
+              0.0
+        )
+      )
+
+      ;; --- выбираем ту из двух перпендикул€рных сторон, котора€
+      ;;     смещает линию размера ¬Ќ»« (под полилинию), независимо
+      ;;     от направлени€ обхода сегмента ---
+      (setq cand1-pt (polar mid-pt (+ seg-ang (/ pi 2.0)) dim-offset))
+      (setq cand2-pt (polar mid-pt (- seg-ang (/ pi 2.0)) dim-offset))
+
+      (if (<= (cadr cand1-pt) (cadr cand2-pt))
+        (progn
+          (setq perp-ang (+ seg-ang (/ pi 2.0)))
+          (setq dim-line-pt cand1-pt)
+        )
+        (progn
+          (setq perp-ang (- seg-ang (/ pi 2.0)))
+          (setq dim-line-pt cand2-pt)
+        )
+      )
+
+      ;; --- создаЄм параллельный (aligned) размер через ActiveX ---
+      (setq dim-obj
+        (vl-catch-all-apply
+          'vla-AddDimAligned
+          (list mspace
+                (vlax-3d-point p1)
+                (vlax-3d-point p2)
+                (vlax-3d-point dim-line-pt)
+          )
+        )
+      )
+
+      (if (or (null dim-obj) (vl-catch-all-error-p dim-obj))
+        (princ
+          (strcat "\n  ќЎ»Ѕ ј: не удалось создать размер"
+                  (if (vl-catch-all-error-p dim-obj)
+                    (strcat " (" (vl-catch-all-error-message dim-obj) ")")
+                    ""
+                  )
+          )
+        )
+        (progn
+          ;; --- назначаем размерный стиль, если он существует ---
+          (if (and dim-style-name
+                   (/= dim-style-name "")
+                   (vl:dimstyle-exists-p dim-style-name)
+              )
+            (vl-catch-all-apply
+              '(lambda () (vla-put-StyleName dim-obj dim-style-name))
+            )
+          )
+
+          ;; --- высота текста размера ---
+          (if (and txt-scale (> txt-scale 0.0))
+            (vl-catch-all-apply
+              '(lambda () (vla-put-TextHeight dim-obj txt-scale))
+            )
+          )
+
+          ;; --- подпись: форматированна€ длина отрезка вместо
+          ;;     "сырого" измерени€ AutoCAD ---
+          (setq label-txt (vl:fmt-length real-dist))
+          (vl-catch-all-apply
+            '(lambda () (vla-put-TextOverride dim-obj label-txt))
+          )
+
+          ;; --- дополнительно отодвигаем подпись от линии размера
+          ;;     на text-gap (по тому же перпендикул€ру) ---
+          (setq text-pt (polar dim-line-pt perp-ang text-gap))
+          (vl-catch-all-apply
+            '(lambda () (vla-put-TextPosition dim-obj (vlax-3d-point text-pt)))
+          )
+
+          (setq dim-ename (vlax-vla-object->ename dim-obj))
+        )
+      )
+    )
+  )
+  dim-ename
+)
+
 ;;; ============================================================
 ;;; √Ћј¬Ќјя  ќћјЌƒј: VERTEXLEADERS
 ;;; «апускаетс€ через команду AutoCAD: VERTEXLEADERS
@@ -9064,9 +9192,6 @@
   (if (null sel)
     (progn
       (princ "\n  ¬ыбор отменЄн пользователем.")
-      (setvar "OSMODE"  old-osmode)
-      (setvar "CMDECHO" old-cmdecho)
-      (setq *error* old-error-handler)
       (princ)
       (exit)
     )
@@ -9087,9 +9212,6 @@
     (progn
       (princ (strcat "\n  ќЎ»Ѕ ј: выбранный объект не €вл€етс€ полилинией (тип: "
                      (cdr (assoc 0 (entget ename))) ")."))
-      (setvar "OSMODE"  old-osmode)
-      (setvar "CMDECHO" old-cmdecho)
-      (setq *error* old-error-handler)
       (princ)
       (exit)
     )
@@ -9100,9 +9222,6 @@
   (if (null vertices)
     (progn
       (princ "\n  ќЎ»Ѕ ј: не удалось извлечь вершины полилинии.")
-      (setvar "OSMODE"  old-osmode)
-      (setvar "CMDECHO" old-cmdecho)
-      (setq *error* old-error-handler)
       (princ)
       (exit)
     )
