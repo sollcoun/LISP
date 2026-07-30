@@ -9234,18 +9234,26 @@
     )
   )
 
-  ;; --- Запрашиваем выбор полилинии ---
-  (setq sel (entsel "\nВыберите полилинию: "))
+;; --- Запрашиваем выбор одной или нескольких полилиний ---
+  (setq ss (ssget '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
 
-  (if (null sel)
+  (if (null ss)
     (progn
-      (princ "\n  Выбор отменён пользователем.")
+      (princ "\n  Выбор отменён, либо не выбрано ни одной полилинии.")
       (princ)
       (exit)
     )
   )
 
-  (setq ename (car sel))
+  ;; Превращаем набор выбора в список ename
+  (setq ename-list '())
+  (setq sel-idx 0)
+  (repeat (sslength ss)
+    (setq ename-list (append ename-list (list (ssname ss sel-idx))))
+    (setq sel-idx (1+ sel-idx))
+  )
+
+  (princ (strcat "\n  Выбрано полилиний: " (itoa (length ename-list))))
 
   (if (and *VL:LAST-POLY-ENAME* (not (entget *VL:LAST-POLY-ENAME*)))
     (progn
@@ -9254,29 +9262,6 @@
       (princ "\n Предыдущая полилиния была удалена. Счетчик сброшен.")
     )
   )
-
-  (if (not (member (cdr (assoc 0 (entget ename)))
-                   '("LWPOLYLINE" "POLYLINE" "3DPOLYLINE")))
-    (progn
-      (princ (strcat "\n  ОШИБКА: выбранный объект не является полилинией (тип: "
-                     (cdr (assoc 0 (entget ename))) ")."))
-      (princ)
-      (exit)
-    )
-  )
-
-  ;; --- Получаем вершины полилинии ---
-  (setq vertices (vl:get-polyline-vertices ename))
-  (if (null vertices)
-    (progn
-      (princ "\n  ОШИБКА: не удалось извлечь вершины полилинии.")
-      (princ)
-      (exit)
-    )
-  )
-
-  (setq pt-count (length vertices))
-  (princ (strcat "\n  Найдено вершин: " (itoa pt-count)))
 
 
 (setq number-mode *VL:DEFAULT-NUMBER-MODE*)
@@ -9355,6 +9340,16 @@
     )
   )
 
+(foreach ename ename-list
+   (progn
+    ;; --- Получаем вершины ТЕКУЩЕЙ полилинии ---
+    (setq vertices (vl:get-polyline-vertices ename))
+    (if (null vertices)
+      (princ "\n  ОШИБКА: не удалось извлечь вершины полилинии, пропускаю объект.")
+      (progn
+       (setq pt-count (length vertices))
+       (princ (strcat "\n\n  --- Обработка полилинии (" (itoa pt-count) " верш.) ---"))
+
 ;; ============================================================
   ;; ЧАСТЬ 1: координатные выноски и номера
   ;; ============================================================
@@ -9418,6 +9413,10 @@
   ;; ============================================================
   (setq seg-count (1- pt-count))
   (setq seg-idx 0)
+     )
+    )
+   )
+  ) 
 
   (if (= dim-mode "Да")
     (progn
