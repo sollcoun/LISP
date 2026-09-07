@@ -8196,10 +8196,15 @@
 ;;; Возвращает: entity name созданного MLEADER или nil
 ;;; ------------------------------------------------------------
 (defun vl:create-mleader (pt-arrow pt-land pt-text mtext-str style-name dogleg-len
-                           / acadobj mspace mleader pts-variant)
+                           / acadobj mspace mleader pts-variant old-cmleaderstyle)
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
   (setq mspace  (vla-get-modelspace (vla-get-activedocument acadobj)))
+
+  (setq old-cmleaderstyle (getvar "CMLEADERSTYLE"))
+  (if (vl:mleader-style-exists-p style-name)
+    (vl-catch-all-apply 'setvar (list "CMLEADERSTYLE" style-name))
+  )
 
   (setq pts-variant
     (vlax-make-safearray vlax-vbdouble '(0 . 5))
@@ -8213,55 +8218,42 @@
 
   (setq mleader (vla-AddMLeader mspace pts-variant 0))
 
+  (setvar "CMLEADERSTYLE" old-cmleaderstyle)
+
   (if (null mleader)
     (progn (princ "\n  ОШИБКА: не удалось создать MLEADER.") nil)
     (progn
-      ;; Назначаем базовый стиль
       (vl-catch-all-apply
         '(lambda () (vla-put-StyleName mleader style-name))
       )
-      ;; Отключаем стрелку: 20 = None (_None)
       (vl-catch-all-apply
         '(lambda () (vla-put-ArrowheadType mleader 20))
       )
-      ;; --- Включаем горизонтальную полку (правильное имя свойства!) ---
       (vl-catch-all-apply
         '(lambda () (vla-put-EnableDogleg mleader :vlax-true))
       )
-      ;; --- Реальная длина полки ---
       (vl-catch-all-apply
         '(lambda () (vla-put-DoglegLength mleader dogleg-len))
       )
-      ;; Тип выноски: 1 = прямая линия
       (vl-catch-all-apply
         '(lambda () (vla-put-LeaderLineType mleader 1))
       )
-      ;; Тип содержимого: 1 = MTEXT
       (vl-catch-all-apply
         '(lambda () (vla-put-ContentType mleader 1))
       )
-      ;; Текст
       (vl-catch-all-apply
         '(lambda () (vla-put-TextString mleader mtext-str))
       )
-      ;; --- Выравнивание текста: по левому краю (один аргумент!) ---
       (vl-catch-all-apply
         '(lambda () (vla-put-TextAttachmentType mleader 1))
       )
       (vl-catch-all-apply
         '(lambda () (vla-put-TextAngle mleader 0.0))
       )
-      ;; --- Маска фона для текста мультивыноски (с явным цветом) ---
       (vl-catch-all-apply
         '(lambda ()
            (vla-put-TextBackgroundFill mleader :vlax-true)
            (vla-put-TextBackgroundScaleFactor mleader 1.05)
-(princ
-  (strcat
-    "\nScale = "
-    (rtos (vla-get-BackgroundScaleFactor mt) 2 2)
-  )
-)
            (vla-put-TextBackgroundColor mleader 254)
         )
       )
@@ -8510,7 +8502,7 @@
 
 (defun vl:estimate-text-width (txt-str height / n)
   (setq n (strlen txt-str))
-  (* n height 0.62)
+  (* n height 0.75)   ; чуть шире — запас под реальный шрифт
 )
 
 (defun vl:bbox-make-centered (cx cy w h)
@@ -8669,23 +8661,36 @@
 
 (defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
                                  / angles radii found best-pt cand cbbox ok
-                                   seg-i p1 p2 outward-ang sorted-angles)
+                                   seg-i p1 p2 outward-ang sorted-angles
+                                   pad dogleg text-left text-right text-bot text-top
+                                   lead-ok)
+
+  ;; ------------------------------------------------------------------
+  ;; Ищем точку приземления (land).
+  ;; Текст стилем ставится СПРАВА от land на длину dogleg.
+  ;; Поэтому проверяем именно область текста + небольшой зазор.
+  ;; Сильнее предпочитаем направление «наружу» и берём большие радиусы.
+  ;; ------------------------------------------------------------------
+  (setq dogleg base-radius)
+  (setq pad    (* label-h 0.35))     ; заметный зазор между подписями
 
   (setq outward-ang (vl:outward-angle vertices seg-count vertex-idx closed
                       (vl:polygon-orientation-sign vertices seg-count closed)))
   (if (null outward-ang) (setq outward-ang 0.0))
 
-  (princ (strcat "\nDebug Vertex " (itoa vertex-idx) " outward=" (rtos outward-ang 2 1)))
-
-  (setq angles '(0 22.5 45 67.5 90 112.5 135 157.5 180 202.5 225 247.5 270 292.5 315 337.5))
+  ;; Более частый набор углов
+  (setq angles '(0 15 30 45 60 75 90 105 120 135 150 165 180
+                 195 210 225 240 255 270 285 300 315 330 345))
   (setq sorted-angles (vl:sort-angles-by-target angles outward-ang))
 
-  ;; Ещё большие расстояния
-  (setq radii (list (* base-radius 3.0) 
-                    (* base-radius 5.0) 
-                    (* base-radius 8.0) 
-                    (* base-radius 12.0) 
-                    (* base-radius 18.0)))
+  ;; Начинаем с более дальних расстояний — меньше шансов наложиться
+  (setq radii (list (* base-radius 3.0)
+                    (* base-radius 5.0)
+                    (* base-radius 7.5)
+                    (* base-radius 11.0)
+                    (* base-radius 16.0)
+                    (* base-radius 22.0)
+                    (* base-radius 30.0)))
 
   (setq found nil)
 
@@ -8694,14 +8699,27 @@
       (foreach ang sorted-angles
         (if (not found)
           (progn
-            (setq cand  (vl:candidate-point vertex-pt ang rad))
-            (setq cbbox (vl:bbox-make-centered (car cand) (cadr cand) label-w label-h))
+            (setq cand (vl:candidate-point vertex-pt ang rad))
+
+            ;; Область текста (dogleg вправо от land)
+            (setq text-left  (+ (car cand) dogleg))
+            (setq text-right (+ text-left label-w))
+            (setq text-bot   (- (cadr cand) (/ label-h 2.0)))
+            (setq text-top   (+ (cadr cand) (/ label-h 2.0)))
+
+            (setq cbbox (list (- text-left  pad)
+                              (- text-bot   pad)
+                              (+ text-right pad)
+                              (+ text-top   pad)))
+
             (setq ok T)
 
+            ;; 1. Не пересекаться с уже поставленными подписями
             (foreach pb *VL:PLACED-BBOXES*
               (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
             )
 
+            ;; 2. Не пересекаться с сегментами полилинии
             (setq seg-i 0)
             (repeat seg-count
               (if ok
@@ -8717,6 +8735,7 @@
               (setq seg-i (1+ seg-i))
             )
 
+            ;; 3. Замыкающий сегмент
             (if (and ok closed)
               (progn
                 (setq p1 (nth seg-count vertices))
@@ -8729,10 +8748,9 @@
             )
 
             (if ok
-              (progn 
-                (setq best-pt cand) 
+              (progn
+                (setq best-pt cand)
                 (setq found T)
-                (princ (strcat "  ? angle " (rtos ang 2 1) ", rad " (rtos rad 2 1)))
               )
             )
           )
@@ -8741,15 +8759,25 @@
     )
   )
 
+  ;; Fallback — далеко по направлению «наружу»
   (if (not found)
-    (progn
-      (princ "\n  ALL ANGLES REJECTED ? fallback")
-      (setq best-pt (vl:candidate-point vertex-pt (if outward-ang outward-ang 0) (* base-radius 12.0)))
-    )
+    (setq best-pt (vl:candidate-point vertex-pt
+                    (if outward-ang outward-ang 0.0)
+                    (* base-radius 25.0)))
   )
 
+  ;; Запоминаем bbox текста
+  (setq text-left  (+ (car best-pt) dogleg))
+  (setq text-right (+ text-left label-w))
+  (setq text-bot   (- (cadr best-pt) (/ label-h 2.0)))
+  (setq text-top   (+ (cadr best-pt) (/ label-h 2.0)))
+
   (setq *VL:PLACED-BBOXES*
-    (cons (vl:bbox-make-centered (car best-pt) (cadr best-pt) label-w label-h) *VL:PLACED-BBOXES*))
+    (cons (list (- text-left  pad)
+                (- text-bot   pad)
+                (+ text-right pad)
+                (+ text-top   pad))
+          *VL:PLACED-BBOXES*))
 
   best-pt
 )
@@ -9038,7 +9066,9 @@
 ;;; ------------------------------------------------------------
 (defun vl:create-parallel-dim-with-label
        (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
+        other-verts-list parallel-search-dist
         / acadobj mspace dx dy seg-len perp-x perp-y dim-pt mid-pt
+          near-pt to-near-x to-near-y side-dot
           dim-obj length-str char-count required-width label-ename)
 
   (vl-load-com)
@@ -9050,29 +9080,45 @@
   (setq dy (- (cadr pt2) (cadr pt1)))
   (setq seg-len (sqrt (+ (* dx dx) (* dy dy))))
 
-  ;; --- Перпендикуляр к сегменту (нормированный) ---
+  ;; --- "Сырой" перпендикуляр к сегменту (пока без выбора стороны) ---
   (if (> seg-len 1e-9)
-    (progn
-      (setq perp-x (/ (- dy) seg-len))
-      (setq perp-y (/ dx seg-len))
-      ;; Если перпендикуляр направлен вверх — разворачиваем на 180°,
-      ;; чтобы линия размера всегда была ПОД полилинией
-      (if (> perp-y 0.0)
-        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
-      )
-    )
-    ;; Вырожденный (нулевой) сегмент — перпендикуляр "вниз" по умолчанию
-    (progn (setq perp-x 0.0) (setq perp-y -1.0))
+    (setq perp-x (/ (- dy) seg-len)
+          perp-y (/ dx seg-len))
+    (setq perp-x 0.0 perp-y -1.0)
   )
 
-  ;; --- Средняя точка сегмента ---
   (setq mid-pt
     (list (/ (+ (car pt1) (car pt2)) 2.0)
           (/ (+ (cadr pt1) (cadr pt2)) 2.0)
           0.0)
   )
 
-  ;; --- Точка, задающая положение линии размера (смещена вниз) ---
+  ;; ------------------------------------------------------------
+  ;; Выбор стороны размера.
+  ;; Если рядом (в радиусе parallel-search-dist) есть другая
+  ;; выбранная полилиния — размер выносится НАРУЖУ, в сторону,
+  ;; противоположную от неё (чтобы у пары параллельных линий
+  ;; подписи оказались одна сверху, другая снизу и не наложились
+  ;; друг на друга). Если рядом ничего нет — старое поведение
+  ;; по умолчанию (перпендикуляр направлен "вниз", perp-y <= 0).
+  ;; ------------------------------------------------------------
+  (setq near-pt
+    (vl:nearest-pt-on-verts-list mid-pt other-verts-list parallel-search-dist)
+  )
+  (if near-pt
+    (progn
+      (setq to-near-x (- (car near-pt) (car mid-pt)))
+      (setq to-near-y (- (cadr near-pt) (cadr mid-pt)))
+      (setq side-dot (+ (* to-near-x perp-x) (* to-near-y perp-y)))
+      (if (> side-dot 0.0)
+        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
+      )
+    )
+    (if (> perp-y 0.0)
+      (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
+    )
+  )
+
   (setq dim-pt
     (list
       (+ (car mid-pt) (* perp-x offset-dist))
@@ -9081,7 +9127,6 @@
     )
   )
 
-  ;; --- Создаём параллельный (aligned) размер ---
   (setq dim-obj
     (vla-AddDimAligned
       mspace
@@ -9097,38 +9142,30 @@
       nil
     )
     (progn
-      ;; --- Назначаем размерный стиль «ISO-500 пустой», импортированный
-      ;;     из шаблона проекта: он уже содержит нужное оформление
-      ;;     (без стрелок, без выносных линий, текстовый стиль Д-431,
-      ;;     высота, отступ и т.д.) — вручную ничего задавать не нужно ---
       (vl-catch-all-apply '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
 
-      ;; --- Формируем строку значения длины (только для оценки длины) ---
+      ;; оценка ширины текста (для решения: на линии или выноска)
       (setq length-str (vl:fmt-length seg-len))
       (setq char-count (strlen length-str))
-
-      ;; --- Оцениваем, помещается ли текст на линии размера ---
-      ;; Приблизительная ширина одного символа ~ 0.6 * высота текста
       (setq required-width (* char-count txt-height 0.6))
 
       (if (>= seg-len required-width)
-        ;; --- Сегмент достаточно длинный: оставляем встроенный текст
-        ;;     размера как есть — заливка (в т.ч. «Фон») берётся из
-        ;;     назначенного размерного стиля, вручную не переопределяем ---
+        ;; --- Длинный сегмент: <> = живое значение AutoCAD ---
         (progn
+          (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj "<>")))
           (setq label-ename (vlax-vla-object->ename dim-obj))
         )
-        ;; --- Сегмент короче требуемой ширины: скрываем встроенный текст
-        ;;     размера (override на пробел) и выносим значение мультивыноской ---
+        ;; --- Короткий сегмент: вынос (текст статичный) ---
         (progn
           (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
           (princ (strcat "\n  Сегмент короче подписи (" length-str
                          ") — значение вынесено мультивыноской."))
           (setq label-ename
             (vl:create-mleader
-              mid-pt                                             ; Острие на полилинии
-              (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка полки
-              (list (+ (car mid-pt) (* txt-height 2.0)) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0) ; Точка текста
+              mid-pt
+              (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
+              (list (+ (car mid-pt) (* txt-height 2.0))
+                    (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
               length-str
               mleader-style-name
               (* txt-height 1.5)
@@ -9141,7 +9178,253 @@
   )
 )
 
+;;; ============================================================
+;;; М-ЛИНИИ: поиск у полилинии и размер L=
+;;; ============================================================
 
+(defun vl:mline-verts (ename / obj coords verts n k pair)
+  (setq verts '())
+  (setq obj (vlax-ename->vla-object ename))
+  (setq coords (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
+  (if (and (not (vl-catch-all-error-p coords))
+           (listp coords)
+           (numberp (car coords)))
+    (progn
+      (setq n (length coords) k 0)
+      (while (< k n)
+        (setq verts (cons (list (nth k coords) (nth (1+ k) coords) 0.0) verts))
+        (setq k (+ k 3))
+      )
+      (setq verts (reverse verts))
+    )
+  )
+  (if (or (null verts) (< (length verts) 2))
+    (progn
+      (setq verts '())
+      (foreach pair (entget ename)
+        (if (= (car pair) 11)
+          (setq verts (cons (list (cadr pair) (caddr pair) 0.0) verts))
+        )
+      )
+      (setq verts (reverse verts))
+    )
+  )
+  verts
+)
+
+(defun vl:poly-len-2d (verts / i len)
+  (setq len 0.0 i 0)
+  (repeat (max 0 (1- (length verts)))
+    (setq len (+ len (distance (nth i verts) (nth (1+ i) verts))))
+    (setq i (1+ i))
+  )
+  len
+)
+
+(defun vl:dist-pt-poly-2d (pt verts / i va vb ax ay bx by px py abx aby ab2 param qx qy d mind)
+  (setq mind 1e99 px (car pt) py (cadr pt) i 0)
+  (repeat (max 0 (1- (length verts)))
+    (setq va (nth i verts) vb (nth (1+ i) verts)
+          ax (car va) ay (cadr va) bx (car vb) by (cadr vb)
+          abx (- bx ax) aby (- by ay)
+          ab2 (+ (* abx abx) (* aby aby)))
+    (if (< ab2 1e-18)
+      (setq d (distance pt va))
+      (progn
+        (setq param (/ (+ (* (- px ax) abx) (* (- py ay) aby)) ab2))
+        (if (< param 0.0) (setq param 0.0))
+        (if (> param 1.0) (setq param 1.0))
+        (setq qx (+ ax (* param abx)) qy (+ ay (* param aby)))
+        (setq d (distance pt (list qx qy 0.0)))
+      )
+    )
+    (if (< d mind) (setq mind d))
+    (setq i (1+ i))
+  )
+  mind
+)
+
+;;; ------------------------------------------------------------
+;;; Ближайшая точка на ОДНОЙ ломаной (список вершин) к точке pt.
+;;; Возвращает точку (x y 0.0) либо nil, если verts пуст/вырожден.
+;;; ------------------------------------------------------------
+(defun vl:nearest-pt-on-verts (pt verts / i va vb ax ay bx by px py abx aby ab2 param qx qy d mind best)
+  (setq mind 1e99 best nil px (car pt) py (cadr pt) i 0)
+  (repeat (max 0 (1- (length verts)))
+    (setq va (nth i verts) vb (nth (1+ i) verts)
+          ax (car va) ay (cadr va) bx (car vb) by (cadr vb)
+          abx (- bx ax) aby (- by ay)
+          ab2 (+ (* abx abx) (* aby aby)))
+    (if (< ab2 1e-18)
+      (progn (setq qx ax qy ay) (setq d (distance pt va)))
+      (progn
+        (setq param (/ (+ (* (- px ax) abx) (* (- py ay) aby)) ab2))
+        (if (< param 0.0) (setq param 0.0))
+        (if (> param 1.0) (setq param 1.0))
+        (setq qx (+ ax (* param abx)) qy (+ ay (* param aby)))
+        (setq d (distance pt (list qx qy 0.0)))
+      )
+    )
+    (if (< d mind) (progn (setq mind d) (setq best (list qx qy 0.0))))
+    (setq i (1+ i))
+  )
+  best
+)
+
+;;; ------------------------------------------------------------
+;;; Ближайшая точка среди СПИСКА ломаных (other-verts-list — список
+;;; списков вершин) к точке pt, в пределах max-dist.
+;;; Возвращает точку либо nil, если ничего не найдено в радиусе.
+;;; ------------------------------------------------------------
+(defun vl:nearest-pt-on-verts-list (pt verts-list max-dist / verts result best-d cand cd)
+  (setq best-d max-dist result nil)
+  (foreach verts verts-list
+    (if (>= (length verts) 2)
+      (progn
+        (setq cand (vl:nearest-pt-on-verts pt verts))
+        (if cand
+          (progn
+            (setq cd (distance pt cand))
+            (if (< cd best-d) (progn (setq best-d cd) (setq result cand)))
+          )
+        )
+      )
+    )
+  )
+  result
+)
+
+(defun vl:add-mleader-simple (pt-arrow pt-text str txt-h style-name / mspace pts ml old-cmleaderstyle)
+  (setq mspace (vla-get-ModelSpace
+                 (vla-get-ActiveDocument (vlax-get-acad-object))))
+
+  (setq old-cmleaderstyle (getvar "CMLEADERSTYLE"))
+  (if (and style-name (vl:mleader-style-exists-p style-name))
+    (vl-catch-all-apply 'setvar (list "CMLEADERSTYLE" style-name))
+  )
+
+  (setq pts (vlax-make-safearray vlax-vbDouble '(0 . 5)))
+  (vlax-safearray-fill pts
+    (list (car pt-arrow) (cadr pt-arrow) 0.0
+          (car pt-text)  (cadr pt-text)  0.0))
+  (setq ml (vl-catch-all-apply 'vla-AddMLeader (list mspace pts 0)))
+
+  (setvar "CMLEADERSTYLE" old-cmleaderstyle)
+
+  (if (vl-catch-all-error-p ml)
+    nil
+    (progn
+      (vl-catch-all-apply '(lambda () (vla-put-StyleName ml style-name)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextString ml str)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextHeight ml txt-h)))
+      ml
+    )
+  )
+)
+
+;;; --- Размеры всех М-линий рядом с полилинией ---
+(defun vl:dim-mlines-near-polyline
+       (pl-ename pl-verts search-dist txt-h dim-style-name mleader-style-name
+        / ss-ml j ml-en ml-verts d found-list len p1 p2 mid-ml
+          mspace dim-obj txt need-w off)
+
+  (setq found-list '())
+  (setq search-dist (if search-dist search-dist 5.0))
+  (setq txt-h (if txt-h txt-h 1.0))
+  (setq off 1.0)
+
+  (setq ss-ml (ssget "_X" '((0 . "MLINE"))))
+  (if (null ss-ml)
+    (princ "\n  М-линий в чертеже нет.")
+    (progn
+      (setq j 0)
+      (repeat (sslength ss-ml)
+        (setq ml-en (ssname ss-ml j))
+        (setq ml-verts (vl:mline-verts ml-en))
+        (if (>= (length ml-verts) 2)
+          (progn
+            (setq d 1e99)
+            (foreach p ml-verts
+              (setq d (min d (vl:dist-pt-poly-2d p pl-verts)))
+            )
+            (setq d (min d
+              (vl:dist-pt-poly-2d
+                (nth (/ (length ml-verts) 2) ml-verts)
+                pl-verts)))
+            (if (<= d search-dist)
+              (setq found-list (cons (list ml-en ml-verts d) found-list))
+            )
+          )
+        )
+        (setq j (1+ j))
+      )
+
+      (if (null found-list)
+        (princ (strcat "\n  Рядом с полилинией М-линий нет (допуск "
+                       (rtos search-dist 2 1) ")."))
+        (progn
+          (setq mspace (vla-get-ModelSpace
+                         (vla-get-ActiveDocument (vlax-get-acad-object))))
+          (princ (strcat "\n  М-линий у полилинии: " (itoa (length found-list))))
+          (foreach item found-list
+            (setq ml-en    (car item)
+                  ml-verts (cadr item)
+                  d        (caddr item)
+                  len      (vl:poly-len-2d ml-verts)
+                  p1       (car ml-verts)
+                  p2       (last ml-verts)
+                  txt      (strcat "L=" (vl:fmt-length len))
+                  mid-ml   (list (/ (+ (car p1) (car p2)) 2.0)
+                                 (/ (+ (cadr p1) (cadr p2)) 2.0)
+                                 0.0)
+                  need-w   (* (strlen txt) txt-h 0.6))
+
+            (setq dim-obj
+              (vla-AddDimAligned
+                mspace
+                (vlax-3d-point p1)
+                (vlax-3d-point p2)
+                (vlax-3d-point
+                  (list (car mid-ml) (- (cadr mid-ml) off) 0.0))
+              )
+            )
+            (if dim-obj
+              (progn
+                (if dim-style-name
+                  (vl-catch-all-apply
+                    '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
+                )
+                (if (>= len need-w)
+                  (progn
+                    (vl-catch-all-apply
+                      '(lambda () (vla-put-TextOverride dim-obj txt)))
+                    (princ (strcat "\n    " txt " (на размере, dist="
+                                   (rtos d 2 2) ")"))
+                  )
+                  (progn
+                    (vl-catch-all-apply
+                      '(lambda () (vla-put-TextOverride dim-obj " ")))
+                    (vl:add-mleader-simple
+                      mid-ml
+                      (list (+ (car mid-ml) (* txt-h 3.0))
+                            (+ (cadr mid-ml) (* txt-h 2.0))
+                            0.0)
+                      txt
+                      txt-h
+                      mleader-style-name
+                    )
+                    (princ (strcat "\n    " txt " (мультивыноска, dist="
+                                   (rtos d 2 2) ")"))
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
 
 ;;; ============================================================
 ;;; ГЛАВНАЯ КОМАНДА: VERTEXLEADERS
@@ -9160,28 +9443,21 @@
                           dim-style-name actual-dim-style-name
                           old-osmode old-cmdecho start-choice old-error-handler
                           output-mode coord-block-name block-scale
-                          number-mode dim-mode)
+                          number-mode dim-mode
+                          all-sel-verts other-verts-list parallel-search-dist en pr)
 
-  ;; --- Инициализация ---
+
   (vl-load-com)
  
-  ;; Каждая новая обработка полилинии начинает
-  ;; поиск свободных мест с чистой карты
   (setq *VL:PLACED-BBOXES* '())
 
   (setq mleader-style-name "Координаты")   ; желаемое имя стиля MLEADER
   (setq text-style-name    "Д-431")        ; имя текстового стиля
   (setq dim-style-name     "ISO-500 пустой COORD") ; желаемое имя размерного стиля
   (setq coord-block-name "XY")   ; имя блока — как в шаблоне ++РАМКА++.dwg
-  ;; Масштаб вставки блока — отвечает только за геометрию/пропорции
-  ;; блока (линии, рамку и т.п.), НЕ за высоту текста атрибутов:
-  ;; высота текста X/Y всегда принудительно приравнивается к
-  ;; txt-height внутри vl:insert-coord-block, независимо от этого
-  ;; масштаба. Обычно 1.0 достаточно; меняйте, только если сама
-  ;; геометрия блока (не текст) выглядит слишком крупной/мелкой.
+
   (setq block-scale 1.0)
 
-  ;; ВАЖНО: укажите здесь реальный путь к вашему файлу-шаблону
  (setq template-path *VL:TEMPLATE-PATH*)
 
   (setq old-osmode  (getvar "OSMODE"))
@@ -9189,14 +9465,6 @@
   (setvar "CMDECHO" 0)
   (setvar "OSMODE"  0)
 
-  ;; --- Блок обработки ошибок ---
-  ;; ВАЖНО: сохраняем прежний обработчик *error* и ОБЯЗАТЕЛЬНО
-  ;; возвращаем его обратно внутри нового обработчика. Иначе после
-  ;; завершения команды в системе остаётся наш кастомный *error*,
-  ;; который ссылается на локальные переменные old-osmode/old-cmdecho -
-  ;; а они после выхода из функции становятся nil, и следующая же
-  ;; ошибка в ЛЮБОЙ другой команде приведёт к вторичному сбою
-  ;; (setvar с аргументом nil).
   (setq old-error-handler *error*)
   (defun *error* (msg)
     (setvar "OSMODE"  old-osmode)
@@ -9290,6 +9558,8 @@
   (setq land-length (* txt-height 1.5))
   (setq dim-offset    0.7)   ; расстояние от полилинии до линии размера
   (setq dim-text-gap  0.5)   ; отступ текста от линии размера
+  (setq parallel-search-dist 10.0) ; радиус поиска соседней параллельной полилинии,
+                                    ; для выбора стороны размера (сверху/снизу)
 
   ;; --- Список для накопления данных экспорта: (idx x-str y-str) ---
   (setq export-data '())
@@ -9342,10 +9612,30 @@
     )
   )
 
+;; ------------------------------------------------------------
+;; Заранее считаем вершины ВСЕХ выбранных полилиний — нужно,
+;; чтобы при простановке размеров каждой из них знать, где
+;; проходят остальные (для выбора стороны размера: сверху/снизу).
+;; ------------------------------------------------------------
+(setq all-sel-verts '())
+(foreach en ename-list
+  (setq all-sel-verts
+    (append all-sel-verts (list (cons en (vl:get-polyline-vertices en))))
+  )
+)
+
 (foreach ename ename-list
    (progn
     ;; --- Получаем вершины ТЕКУЩЕЙ полилинии ---
     (setq vertices (vl:get-polyline-vertices ename))
+
+    ;; --- Вершины ОСТАЛЬНЫХ выбранных полилиний (для выбора стороны размера) ---
+    (setq other-verts-list '())
+    (foreach pr all-sel-verts
+      (if (and (not (eq (car pr) ename)) (cdr pr))
+        (setq other-verts-list (cons (cdr pr) other-verts-list))
+      )
+    )
     (if (null vertices)
       (princ "\n  ОШИБКА: не удалось извлечь вершины полилинии, пропускаю объект.")
       (progn
@@ -9382,7 +9672,7 @@
     ;; --- Авторасстановка: ищем свободное место под подпись ---
     (setq label-w (vl:estimate-text-width (strcat "X= " (vl:fmt-coord x-coord)) txt-height))
     (setq label-w (max label-w (vl:estimate-text-width (strcat "Y= " (vl:fmt-coord y-coord)) txt-height)))
-    (setq label-h (* txt-height 2.3))
+    (setq label-h (* txt-height 2.8))
     (setq pt-land
       (vl:find-label-placement (list real-x real-y 0.0) label-w label-h vertices seg-count land-length vert-pos poly-closed)
     )
@@ -9390,14 +9680,14 @@
     (if (= output-mode "Мультивыноска")
           (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
 (vl:insert-coord-block
-            (list real-x real-y 0.0)
-            coord-block-name
-            (vl:fmt-coord x-coord)
-            (vl:fmt-coord y-coord)
-            block-scale
-            txt-height
-            0.0
-          )
+  (list real-x real-y 0.0)   ; строго вершина
+  coord-block-name
+  (vl:fmt-coord x-coord)
+  (vl:fmt-coord y-coord)
+  block-scale
+  txt-height
+  0.0
+)
       )
     
  (if (= number-mode "Да")
@@ -9413,9 +9703,6 @@
 ;; ============================================================
   ;; ЧАСТЬ 2: простановка размеров по сторонам полигона
   ;; ============================================================
-  (setq seg-count (1- pt-count))
-  (setq seg-idx 0)
-
   (if (= dim-mode "Да")
     (progn
       (princ "\n\nПростановка размеров по сегментам...")
@@ -9431,6 +9718,8 @@
           actual-dim-style-name
           actual-mleader-style
           dim-text-gap
+          other-verts-list
+          parallel-search-dist
         )
         (setq seg-idx (1+ seg-idx))
       )
@@ -9444,15 +9733,28 @@
           actual-dim-style-name
           actual-mleader-style
           dim-text-gap
+          other-verts-list
+          parallel-search-dist
         )
       )
-      (princ "\nРазмеры проставлены.")
+      (princ "\nРазмеры сегментов проставлены.")
+
+      ;; --- Размеры М-линий рядом с этой полилинией ---
+      (princ "\nПростановка размеров М-линий...")
+      (vl:dim-mlines-near-polyline
+        ename
+        vertices
+        5.0
+        txt-height
+        actual-dim-style-name
+        actual-mleader-style
+      )
     )
   )
-     )
-    )
-   )
-  ) 
+     )   
+    )    
+   )     
+  )      
 
   ;; --- ЭКСПОРТ ВСЕХ ДАННЫХ ---
   (vl:offer-export *VL:ALL-EXPORT-DATA*)
@@ -9465,7 +9767,7 @@
   (command "_.REGEN")
   (princ "\n=== VERTEXLEADERS завершена ===")
   (princ)
-) ;; Это закрывающая скобка всей функции c:VERTEXLEADERS
+) ;; закрывающая скобка c:VERTEXLEADERS
 
 ;;; ============================================================
 ;;; ДОПОЛНИТЕЛЬНАЯ УТИЛИТА: RESETVERTEXNUM
