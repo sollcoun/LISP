@@ -9268,7 +9268,8 @@
 
 (defun vl:mline-near-segment-p (pt1 pt2 search-dist
                                  / ss-ml k ml-en ml-verts d found mid-seg
-                                   seg-dx seg-dy seg-len ml-dx ml-dy ml-len dotp)
+                                   seg-dx seg-dy seg-len ml-dx ml-dy ml-len dotp
+                                   ml-len-val len-diff)
   (setq found nil)
   (setq mid-seg (list (/ (+ (car pt1) (car pt2)) 2.0)
                        (/ (+ (cadr pt1) (cadr pt2)) 2.0)
@@ -9286,26 +9287,29 @@
         (setq ml-verts (vl:mline-verts ml-en))
         (if (>= (length ml-verts) 2)
           (progn
-            ;; рассто€ние от середины —≈√ћ≈Ќ“ј до линии м-линии
             (setq d (vl:dist-pt-poly-2d mid-seg ml-verts))
 
-            ;; направление м-линии (от первой до последней вершины)
             (setq ml-dx (- (car (last ml-verts)) (car (car ml-verts))))
             (setq ml-dy (- (cadr (last ml-verts)) (cadr (car ml-verts))))
             (setq ml-len (sqrt (+ (* ml-dx ml-dx) (* ml-dy ml-dy))))
 
             (if (> ml-len 1e-9)
               (progn
-                ;; косинус угла между сегментом и м-линией (по модулю,
-                ;; т.к. направление обхода может быть любым)
                 (setq dotp
                   (/ (abs (+ (* seg-dx ml-dx) (* seg-dy ml-dy)))
                      (* seg-len ml-len))
                 )
-                ;; совпадением считаем только близкие » почти
-                ;; параллельные линии (угол < ~25∞)
+                ;; р€дом + почти параллельно
                 (if (and (<= d search-dist) (>= dotp 0.9))
-                  (setq found T)
+                  (progn
+                    ;; если разница длин ? 0.15 Ч считаем Ђнакрываетї, размер полилинии не ставим
+                    ;; если разница > 0.15 Ч found остаЄтс€ nil, размер полилинии ставим
+                    (setq ml-len-val (vl:poly-len-2d ml-verts))
+                    (setq len-diff (abs (- seg-len ml-len-val)))
+                    (if (<= len-diff 0.15)
+                      (setq found T)
+                    )
+                  )
                 )
               )
             )
@@ -9867,7 +9871,7 @@
                 (if (not (vl:mline-near-segment-p
                            (nth seg-idx vertices)
                            (nth (1+ seg-idx) vertices)
-                           5.0))
+                           2.0))
                   (vl:create-parallel-dim-with-label
                     (nth seg-idx vertices)
                     (nth (1+ seg-idx) vertices)
