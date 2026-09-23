@@ -8426,8 +8426,8 @@
             (if (and hnd (not (member hnd *VL:COORD-ATTACHED-HANDLES*)))
               (progn
                 (setq obj (vlax-ename->vla-object ent))
-                (vl:attach-coord-reactor obj)
-                (vl-catch-all-apply 'vl:refresh-coord-attrs (list obj))
+                ;; (vl:attach-coord-reactor obj)
+                ;; (vl-catch-all-apply 'vl:refresh-coord-attrs (list obj))
               )
             )
             (setq i (1+ i))
@@ -8508,7 +8508,7 @@
     (repeat (sslength ss)
       (setq ent (ssname ss i))
       (setq obj (vlax-ename->vla-object ent))
-      (vl:attach-coord-reactor obj)
+      ;; (vl:attach-coord-reactor obj)
       (setq i (1+ i))
     )
   )
@@ -8804,36 +8804,79 @@
   best-pt
 )
 
+(if (not (boundp '*VL:COORD-MASTER-ENAME*)) (setq *VL:COORD-MASTER-ENAME* nil))
+(if (not (boundp '*VL:COORD-MASTER-PT*))    (setq *VL:COORD-MASTER-PT* nil))
+
 (defun vl:insert-coord-block (pt-vertex block-name x-str y-str scale txt-height rot-ang
-                               / acadobj mspace blk-ref atts att tag readback)
+                               / acadobj mspace blk-ref atts att tag
+                                 props prop pname old-attreq old-attdia old-cmdecho old-osmode
+                                 master-valid entget-result)
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
   (setq mspace  (vla-get-modelspace (vla-get-activedocument acadobj)))
 
-  ;; --- Вставка блока прямо в точку вершины полилинии ---
-  (setq blk-ref
-    (vl-catch-all-apply
-      'vla-InsertBlock
-      (list mspace (vlax-3d-point pt-vertex) block-name scale scale scale rot-ang)
+  (setq old-attreq  (getvar "ATTREQ"))
+  (setq old-attdia  (getvar "ATTDIA"))
+  (setq old-cmdecho (getvar "CMDECHO"))
+  (setq old-osmode  (getvar "OSMODE"))
+  (setvar "ATTREQ"  0)
+  (setvar "ATTDIA"  0)
+  (setvar "CMDECHO" 0)
+  (setvar "OSMODE"  0)
+
+  (setq entget-result
+    (if *VL:COORD-MASTER-ENAME*
+      (vl-catch-all-apply 'entget (list *VL:COORD-MASTER-ENAME*))
+      nil
+    )
+  )
+  (setq master-valid
+    (and *VL:COORD-MASTER-ENAME*
+         (not (vl-catch-all-error-p entget-result))
+         entget-result
     )
   )
 
-  (if (vl-catch-all-error-p blk-ref)
+  (if master-valid
+    ;; --- Копируем уже РАБОТАЮЩИЙ экземпляр (одиночное копирование,
+    ;; завершается само после второй точки — лишний "" не нужен) ---
     (progn
-      (princ (strcat "\n  ОШИБКА: не удалось вставить блок «" block-name "»: "
-                     (vl-catch-all-error-message blk-ref)))
+      (command "_.COPY" *VL:COORD-MASTER-ENAME* ""
+               *VL:COORD-MASTER-PT*
+               pt-vertex)
+      (while (> (getvar "CMDACTIVE") 0) (command ""))
+      (setq blk-ref (vl-catch-all-apply 'vlax-ename->vla-object (list (entlast))))
+    )
+    ;; --- Самый первый экземпляр — создаём командой INSERT ---
+    (progn
+      (command "_.-INSERT" block-name pt-vertex scale scale rot-ang)
+      (while (> (getvar "CMDACTIVE") 0) (command ""))
+      (setq blk-ref (vl-catch-all-apply 'vlax-ename->vla-object (list (entlast))))
+      (if (not (vl-catch-all-error-p blk-ref))
+        (progn
+          (setq *VL:COORD-MASTER-ENAME* (vlax-vla-object->ename blk-ref))
+          (setq *VL:COORD-MASTER-PT*    pt-vertex)
+        )
+      )
+    )
+  )
+
+  (setvar "ATTREQ"  old-attreq)
+  (setvar "ATTDIA"  old-attdia)
+  (setvar "CMDECHO" old-cmdecho)
+  (setvar "OSMODE"  old-osmode)
+
+  (if (or (vl-catch-all-error-p blk-ref) (null blk-ref))
+    (progn
+      (princ (strcat "\n  ОШИБКА: не удалось создать/скопировать блок «" block-name "»."))
       nil
     )
     (progn
-      ;; --- КРИТИЧЕСКИ ВАЖНО: обновляем объект сразу после вставки.
-      ;; Без этого HasAttributes/GetAttributes у только что созданного
-      ;; блока может ложно возвращать "нет атрибутов", даже если в
-      ;; определении блока атрибуты реально есть. ---
-      (vl-catch-all-apply '(lambda () (vla-Update blk-ref)))
+      (vl-catch-all-apply '(lambda () (vla-put-XScaleFactor blk-ref scale)))
+      (vl-catch-all-apply '(lambda () (vla-put-YScaleFactor blk-ref scale)))
+      (vl-catch-all-apply '(lambda () (vla-put-ZScaleFactor blk-ref scale)))
+      (vl-catch-all-apply '(lambda () (vla-put-Rotation blk-ref rot-ang)))
 
-      ;; --- Пытаемся получить атрибуты через ActiveX. Не полагаемся
-      ;; только на HasAttributes — иногда оно врёт даже после Update,
-      ;; поэтому пробуем GetAttributes напрямую и ловим ошибку. ---
       (setq atts (vl-catch-all-apply 'vlax-invoke (list blk-ref 'GetAttributes)))
       (if (vl-catch-all-error-p atts) (setq atts nil))
 
@@ -8841,49 +8884,47 @@
         (progn
           (foreach att atts
             (setq tag (strcase (vla-get-TagString att)))
-            (cond
-              ;; Латинские X/Y
-              ((= tag "X") (vla-put-TextString att (strcat "X= " x-str)))
-              ((= tag "Y") (vla-put-TextString att (strcat "Y= " y-str)))
-              ;; Кириллические омоглифы Х/У (часто встречаются в русских
-              ;; шаблонах и визуально неотличимы от латинских X/Y)
-              ((= tag "Х") (vla-put-TextString att (strcat "X= " x-str)))   ; кириллица Х (U+0425)
-              ((= tag "У") (vla-put-TextString att (strcat "Y= " y-str)))   ; кириллица У (U+0423)
-              (T
-               (princ (strcat "\n    [диагностика] тег «" tag
-                              "» не распознан как X или Y — атрибут не обновлён.")))
+            (if (not (member tag '("X" "Х" "Y" "У")))
+              (princ (strcat "\n    [диагностика] тег «" tag "» не распознан."))
             )
-             (if (> scale 1e-9)
+            (if (> scale 1e-9)
               (vl-catch-all-apply
                 '(lambda () (vla-put-Height att (/ txt-height scale)))
               )
             )
             (vl-catch-all-apply '(lambda () (vla-put-Rotation att 0.0)))
-            ;; --- Проверяем, "прилипло" ли наше значение (не Field ли это) ---
-            (setq readback (vl-catch-all-apply 'vla-get-TextString (list att)))
-            (if (and (not (vl-catch-all-error-p readback))
-                     (member tag '("X" "Y" "Х" "У"))
-                     (or (wcmatch readback "*<*") (wcmatch readback "*%<*")))
-              (princ (strcat "\n    [диагностика] ВНИМАНИЕ: атрибут «" tag
-                             "» похож на ПОЛЕ (Field) — значение может"
-                             " быть перезаписано при следующей регенерации."))
-            )
           )
           (vla-Update blk-ref)
-          ;; --- Навешиваем реактор ПОСЛЕ того как атрибуты записаны,
-          ;; чтобы дальнейшие перемещения блока пересчитывали X/Y ---
-          (vl:attach-coord-reactor blk-ref)
+
+          (setq props
+            (vl-catch-all-apply 'vlax-invoke (list blk-ref 'GetDynamicBlockProperties))
+          )
+          (if (not (vl-catch-all-error-p props))
+            (foreach prop props
+              (setq pname (vla-get-PropertyName prop))
+              (if (or (= pname "Расстояние1")
+                      (= pname "Distance1")
+                      (wcmatch pname "*асстояние*")
+                      (wcmatch pname "*istance*"))
+                (vl-catch-all-apply '(lambda () (vla-put-Value prop 6.7ф)))
+              )
+            )
+          )
+         (vla-Update blk-ref)
+
           (setq *VL:COORD-BLOCK-NAME* block-name)
         )
-        (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: не удалось получить атрибуты блока «"
-                       block-name "» даже после Update — проверьте, что блок"
-                       " действительно атрибутивный (WBLOCK/BEDIT)."))
+        (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: нет атрибутов у блока «" block-name "»."))
       )
+
+      ;; --- Выносим блок на передний план (поверх штриховок/подложки) ---
+      (command "_.DRAWORDER" (vlax-vla-object->ename blk-ref) "" "_Front")
+      (while (> (getvar "CMDACTIVE") 0) (command ""))
+
       (vlax-vla-object->ename blk-ref)
     )
   )
 )
-
 ;;; ------------------------------------------------------------
 ;;; Извлекает список вершин из полилинии (LWPOLYLINE или
 ;;; 2D/3D POLYLINE). Возвращает список точек в формате (x y z).
@@ -9662,6 +9703,7 @@
   (if (and *VL:LAST-POLY-ENAME* (not (entget *VL:LAST-POLY-ENAME*)))
     (progn
       (setq *VL:LAST-VERTEX-NUM* nil)
+      (setq *VL:COORD-MASTER-PT* nil)
       (setq *VL:ALL-EXPORT-DATA* '())
       (princ "\n Предыдущая полилиния была удалена. Счетчик сброшен.")
     )
@@ -9719,13 +9761,13 @@
   (if (= number-mode "Нет")
     (setq idx 1)
     (progn
-      (initget "Авто Вручную")
+      (initget "Авто Начальный номер точки")
       (setq num-choice
-        (getkword "\nНумерация вершин? [Авто/Вручную] <Авто>: ")
+        (getkword "\nНумерация вершин? [Авто/Начальный номер точки] <Авто>: ")
       )
       (if (null num-choice) (setq num-choice "Авто"))
 
-      (if (= num-choice "Вручную")
+      (if (= num-choice "Начальный номер точки")
         (progn
           (setq idx (getint "\nС какого номера начать? <1>: "))
           (if (null idx) (setq idx 1))
@@ -9952,7 +9994,9 @@
   (setq *VL:ALL-EXPORT-DATA* '())
   (setq *VL:LAST-POLY-ENAME* nil)
   (setq *VL:PLACED-BBOXES* '())
-  (princ "\nСчётчик, накопленные данные и карта занятых мест под подписи сброшены.")
+  (setq *VL:COORD-MASTER-ENAME* nil)
+  (setq *VL:COORD-MASTER-PT* nil)
+  (princ "\nСброс, следующий вызов начнёт нумерацию точек как для первого запуска.")
   (princ)
 )
 
