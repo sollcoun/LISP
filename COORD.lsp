@@ -7861,7 +7861,6 @@
 )
 (if (not (findfile *VL:TEMPLATE-PATH*))
   (progn
-    (princ "\n  Распаковываю встроенный шаблон стилей...")
     (setq *VL:DECODE-RESULT*
       (vl-catch-all-apply
         'vl:base64-decode-to-file
@@ -7871,7 +7870,6 @@
     (if (vl-catch-all-error-p *VL:DECODE-RESULT*)
       (princ (strcat "\n  ОШИБКА распаковки шаблона: "
                       (vl-catch-all-error-message *VL:DECODE-RESULT*)))
-      (princ "\n  Готово.")
     )
   )
 )
@@ -7948,12 +7946,9 @@
   (setq result (vl-catch-all-apply 'vla-item (list styles style-name)))
   (if (vl-catch-all-error-p result)
     (progn
-      (princ (strcat "\n  Текстовый стиль «" style-name "» не найден. Создаю..."))
       (setq ts (vla-add styles style-name))
       (vl-catch-all-apply '(lambda () (vla-put-fontfile ts "arial.ttf")))
-      (princ (strcat "\n  Текстовый стиль «" style-name "» создан."))
     )
-    (princ (strcat "\n  Текстовый стиль «" style-name "» найден."))
   )
   style-name
 )
@@ -7987,10 +7982,7 @@
 (defun vl:ensure-mleader-style-from-template (template-path mleader-style
                                                / old-filedia old-cmdecho old-osmode)
   (if (vl:mleader-style-exists-p mleader-style)
-    (progn
-      (princ (strcat "\n  Стиль «" mleader-style "» уже есть в чертеже."))
-      T
-    )
+    T
     (if (not (findfile template-path))
       (progn
         (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: файл шаблона не найден: " template-path))
@@ -7999,7 +7991,6 @@
         nil
       )
       (progn
-        (princ (strcat "\n  Импортирую стиль «" mleader-style "» из шаблона..."))
         (setq old-filedia (getvar "FILEDIA"))
         (setq old-cmdecho (getvar "CMDECHO"))
         (setq old-osmode  (getvar "OSMODE"))
@@ -8025,10 +8016,7 @@
         (setvar "OSMODE"  old-osmode)
 
         (if (vl:mleader-style-exists-p mleader-style)
-          (progn
-            (princ (strcat "\n  Стиль «" mleader-style "» успешно импортирован."))
-            T
-          )
+          T
           (progn
             (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: импорт не удался, стиль «"
                            mleader-style "» не появился в чертеже."))
@@ -8052,17 +8040,13 @@
 (defun vl:ensure-dimstyle-from-template (template-path dim-style
                                           / old-filedia old-cmdecho old-osmode)
   (if (vl:dimstyle-exists-p dim-style)
-    (progn
-      (princ (strcat "\n  Размерный стиль «" dim-style "» уже есть в чертеже."))
-      T
-    )
+    T
     (if (not (findfile template-path))
       (progn
         (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: файл шаблона не найден: " template-path))
         nil
       )
       (progn
-        (princ (strcat "\n  Импортирую размерный стиль «" dim-style "» из шаблона..."))
         (setq old-filedia (getvar "FILEDIA"))
         (setq old-cmdecho (getvar "CMDECHO"))
         (setq old-osmode  (getvar "OSMODE"))
@@ -8088,10 +8072,7 @@
         (setvar "OSMODE"  old-osmode)
 
         (if (vl:dimstyle-exists-p dim-style)
-          (progn
-            (princ (strcat "\n  Размерный стиль «" dim-style "» успешно импортирован."))
-            T
-          )
+          T
           (progn
             (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: импорт не удался, размерный стиль «"
                            dim-style "» не появился в чертеже."))
@@ -8115,17 +8096,13 @@
 (defun vl:ensure-coord-block-from-template (template-path block-name
                                              / old-filedia)
   (if (tblsearch "BLOCK" block-name)
-    (progn
-      (princ (strcat "\n  Блок «" block-name "» уже есть в чертеже."))
-      T
-    )
+    T
     (if (not (findfile template-path))
       (progn
         (princ (strcat "\n  ПРЕДУПРЕЖДЕНИЕ: файл шаблона не найден: " template-path))
         nil
       )
       (progn
-        (princ (strcat "\n  Импортирую блок «" block-name "» из шаблона..."))
         (setq old-filedia (getvar "FILEDIA"))
         (setvar "FILEDIA" 0)
 
@@ -8146,10 +8123,7 @@
         (setvar "FILEDIA" old-filedia)
 
         (if (tblsearch "BLOCK" block-name)
-          (progn
-            (princ (strcat "\n  Блок «" block-name "» успешно импортирован."))
-            T
-          )
+          T
           (progn
             (princ (strcat "\n  ОШИБКА: блок «" block-name
                            "» не найден ни в чертеже, ни в шаблоне."))
@@ -9221,8 +9195,6 @@
         ;; --- Короткий сегмент: вынос (текст статичный) ---
         (progn
           (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
-          (princ (strcat "\n  Сегмент короче подписи (" length-str
-                         ") — значение вынесено мультивыноской."))
           (setq label-ename
             (vl:create-mleader
               mid-pt
@@ -9577,8 +9549,6 @@
                   (progn
                     (vl-catch-all-apply
                       '(lambda () (vla-put-TextOverride dim-obj txt)))
-                    (princ (strcat "\n    " txt " (на размере, dist="
-                                   (rtos d 2 2) ")"))
                   )
                   (progn
                     (vl-catch-all-apply
@@ -9592,8 +9562,6 @@
                       txt-h
                       mleader-style-name
                     )
-                    (princ (strcat "\n    " txt " (мультивыноска, dist="
-                                   (rtos d 2 2) ")"))
                   )
                 )
               )
@@ -9658,7 +9626,6 @@
   )
 
   (princ "\n=== Простановка координатных выносок и размеров по полилинии ===")
-  (princ "\n  Команда: COORD")
 
   (vl:ensure-text-style text-style-name)
 
@@ -9741,7 +9708,6 @@
     )
   )
   (if (null output-mode) (setq output-mode "Мультивыноска"))
-  (princ (strcat "\n  Выбран способ: " output-mode))
 
   (if (= output-mode "Блок")
     (vl:ensure-coord-block-from-template template-path coord-block-name)
@@ -9800,14 +9766,6 @@
   )
   (princ (strcat "\n  Нумерация вершин начнётся с №" (itoa idx) "."))
 
-  (if (and *VL:LAST-POLY-ENAME* (not (entget *VL:LAST-POLY-ENAME*)))
-    (progn
-      (setq *VL:LAST-VERTEX-NUM* nil)
-      (setq *VL:ALL-EXPORT-DATA* '())
-      (princ "\n Предыдущая полилиния была удалена. Сброс истории.")
-    )
-  )
-
   ;; --- Собираем вершины всех выбранных полилиний ---
   (setq all-sel-verts '())
   (foreach en ename-list
@@ -9850,8 +9808,6 @@
 
             (if (not already)
               (progn
-                (princ (strcat "\n  Обработка вершины №" (itoa idx) "..."))
-
                 (setq real-x (car pt))
                 (setq real-y (cadr pt))
 
@@ -9905,7 +9861,6 @@
           ;; ============================================================
           (if (= dim-mode "Да")
             (progn
-              (princ "\n\nПростановка размеров по сегментам...")
               (setq seg-count (1- pt-count))
               (setq seg-idx 0)
 
@@ -9946,9 +9901,6 @@
                   parallel-search-dist
                 )
               )
-              (princ "\nРазмеры сегментов проставлены.")
-
-                            (princ "\nПростановка размеров М-линий...")
               (setq dimmed-mlines-list
                 (vl:dim-mlines-near-polyline
                   ename
@@ -10032,9 +9984,5 @@
 ;;; ============================================================
 ;;; Сообщение об успешной загрузке
 ;;; ============================================================
-(princ "\n+-----------------------------------------+")
-(princ "\n|  COORD.lsp успешно загружен.            |")
-(princ "\n|  Доступные команды:                     |")
-(princ "\n|  CCL / COORD / КООР — выноска координат |")
-(princ "\n+-----------------------------------------+")
+(princ "\nCOORD.lsp загружен. Команды: CCL / COORD / КООР.")
 (princ)
