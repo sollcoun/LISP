@@ -9280,9 +9280,10 @@
 )
 
 (defun vl:mline-near-segment-p (pt1 pt2 search-dist
-                                 / ss-ml k ml-en ml-verts d found mid-seg
-                                   seg-dx seg-dy seg-len ml-dx ml-dy ml-len dotp
-                                   ml-len-val len-diff)
+                                 / ss-ml k ml-en ml-verts found mid-seg
+                                   seg-dx seg-dy seg-len
+                                   i va vb ml-dx ml-dy ml-seg-len
+                                   d dotp len-diff)
   (setq found nil)
   (setq mid-seg (list (/ (+ (car pt1) (car pt2)) 2.0)
                        (/ (+ (cadr pt1) (cadr pt2)) 2.0)
@@ -9300,31 +9301,28 @@
         (setq ml-verts (vl:mline-verts ml-en))
         (if (>= (length ml-verts) 2)
           (progn
-            (setq d (vl:dist-pt-poly-2d mid-seg ml-verts))
-
-            (setq ml-dx (- (car (last ml-verts)) (car (car ml-verts))))
-            (setq ml-dy (- (cadr (last ml-verts)) (cadr (car ml-verts))))
-            (setq ml-len (sqrt (+ (* ml-dx ml-dx) (* ml-dy ml-dy))))
-
-            (if (> ml-len 1e-9)
-              (progn
-                (setq dotp
-                  (/ (abs (+ (* seg-dx ml-dx) (* seg-dy ml-dy)))
-                     (* seg-len ml-len))
-                )
-                ;; рядом + почти параллельно
-                (if (and (<= d search-dist) (>= dotp 0.9))
-                  (progn
-                    ;; если разница длин ? 0.15 — считаем «накрывает», размер полилинии не ставим
-                    ;; если разница > 0.15 — found остаётся nil, размер полилинии ставим
-                    (setq ml-len-val (vl:poly-len-2d ml-verts))
-                    (setq len-diff (abs (- seg-len ml-len-val)))
-                    (if (<= len-diff 0.15)
-                      (setq found T)
-                    )
+            (setq i 0)
+            (while (and (not found) (< i (1- (length ml-verts))))
+              (setq va (nth i ml-verts)
+                    vb (nth (1+ i) ml-verts)
+                    ml-dx (- (car vb) (car va))
+                    ml-dy (- (cadr vb) (cadr va))
+                    ml-seg-len (distance va vb))
+              (if (> ml-seg-len 1e-9)
+                (progn
+                  (setq d (vl:dist-pt-poly-2d mid-seg (list va vb)))
+                  (setq dotp
+                    (/ (abs (+ (* seg-dx ml-dx) (* seg-dy ml-dy)))
+                       (* seg-len ml-seg-len)))
+                  ;; близко + почти параллельно + почти та же длина
+                  (if (and (<= d search-dist)
+                           (>= dotp 0.9)
+                           (<= (abs (- seg-len ml-seg-len)) 0.15))
+                    (setq found T)
                   )
                 )
               )
+              (setq i (1+ i))
             )
           )
         )
@@ -9438,9 +9436,11 @@
 
 ;;; --- Размеры всех М-линий рядом с полилинией ---
 (defun vl:dim-mlines-near-polyline
-       (pl-ename pl-verts search-dist txt-h dim-style-name mleader-style-name mline-prefix already-dimmed
-        / ss-ml j ml-en ml-verts d found-list len p1 p2 mid-ml
+       (pl-ename pl-verts search-dist txt-h dim-style-name mleader-style-name
+                 mline-prefix already-dimmed
+        / ss-ml j ml-en ml-verts d found-list
           mspace dim-obj txt need-w off
+          i p1 p2 mid-ml len
           dx dy seg-len2 perp-x perp-y near-pt to-near-x to-near-y side-dot dim-pt)
 
   (setq found-list '())
@@ -9451,7 +9451,7 @@
 
   (setq ss-ml (ssget "_X" '((0 . "MLINE"))))
   (if (null ss-ml)
-    (princ "\n  М-линий в чертеже нет.")
+    (princ "\n  MLINE не найдены.")
     (progn
       (setq j 0)
       (repeat (sslength ss-ml)
@@ -9461,16 +9461,13 @@
             (setq ml-verts (vl:mline-verts ml-en))
             (if (>= (length ml-verts) 2)
               (progn
+                ;; проверяем, есть ли хотя бы одна вершина MLINE рядом с полилинией
                 (setq d 1e99)
                 (foreach p ml-verts
                   (setq d (min d (vl:dist-pt-poly-2d p pl-verts)))
                 )
-                (setq d (min d
-                  (vl:dist-pt-poly-2d
-                    (nth (/ (length ml-verts) 2) ml-verts)
-                    pl-verts)))
                 (if (<= d search-dist)
-                  (setq found-list (cons (list ml-en ml-verts d) found-list))
+                  (setq found-list (cons (list ml-en ml-verts) found-list))
                 )
               )
             )
@@ -9480,91 +9477,98 @@
       )
 
       (if (null found-list)
-        (princ (strcat "\n  Рядом с полилинией М-линий нет (допуск "
-                       (rtos search-dist 2 1) ")."))
+        (princ (strcat "\n  Нет MLINE в пределах " (rtos search-dist 2 1) "."))
         (progn
           (setq mspace (vla-get-ModelSpace
                          (vla-get-ActiveDocument (vlax-get-acad-object))))
-          (princ (strcat "\n  М-линий у полилинии: " (itoa (length found-list))))
+          (princ (strcat "\n  Обрабатываю MLINE: " (itoa (length found-list))))
+
           (foreach item found-list
             (setq ml-en    (car item)
-                  ml-verts (cadr item)
-                  d        (caddr item)
-                  len      (vl:poly-len-2d ml-verts)
-                  p1       (car ml-verts)
-                  p2       (last ml-verts)
-                  txt      (strcat mline-prefix (vl:fmt-length len))
-                  mid-ml   (list (/ (+ (car p1) (car p2)) 2.0)
-                                 (/ (+ (cadr p1) (cadr p2)) 2.0)
-                                 0.0)
-                  need-w   (* (strlen txt) txt-h 0.6))
+                  ml-verts (cadr item))
 
             (setq already-dimmed (cons ml-en already-dimmed))
 
-            ;; --- перпендикуляр к самой м-линии ---
-            (setq dx (- (car p2) (car p1)))
-            (setq dy (- (cadr p2) (cadr p1)))
-            (setq seg-len2 (distance p1 p2))
-            (if (> seg-len2 1e-9)
-              (setq perp-x (/ (- dy) seg-len2) perp-y (/ dx seg-len2))
-              (setq perp-x 0.0 perp-y -1.0)
-            )
+            ;; === ГЛАВНОЕ ИЗМЕНЕНИЕ: цикл по КАЖДОМУ сегменту MLINE ===
+            (setq i 0)
+            (repeat (1- (length ml-verts))
+              (setq p1  (nth i ml-verts)
+                    p2  (nth (1+ i) ml-verts)
+                    len (distance p1 p2)
+                    mid-ml (list (/ (+ (car p1) (car p2)) 2.0)
+                                 (/ (+ (cadr p1) (cadr p2)) 2.0)
+                                 0.0)
+                    txt (strcat mline-prefix (vl:fmt-length len))
+                    need-w (* (strlen txt) txt-h 0.6))
 
-            ;; --- сторона смещения: в сторону ОТ полилинии ---
-            (setq near-pt (vl:nearest-pt-on-verts mid-ml pl-verts))
-            (if near-pt
-              (progn
-                (setq to-near-x (- (car near-pt) (car mid-ml)))
-                (setq to-near-y (- (cadr near-pt) (cadr mid-ml)))
-                (setq side-dot (+ (* to-near-x perp-x) (* to-near-y perp-y)))
-                (if (> side-dot 0.0)
-                  (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
-                )
-              )
-            )
-
-            (setq dim-pt
-              (list
-                (+ (car mid-ml) (* perp-x off))
-                (+ (cadr mid-ml) (* perp-y off))
-                0.0
-              )
-            )
-
-            (setq dim-obj
-              (vla-AddDimAligned
-                mspace
-                (vlax-3d-point p1)
-                (vlax-3d-point p2)
-                (vlax-3d-point dim-pt)
-              )
-            )
-            (if dim-obj
-              (progn
-                (if dim-style-name
-                  (vl-catch-all-apply
-                    '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
-                )
-                (if (>= len need-w)
-                  (progn
-                    (vl-catch-all-apply
-                      '(lambda () (vla-put-TextOverride dim-obj txt)))
+              ;; ставим размер только если сегмент действительно рядом с полилинией
+              (if (<= (vl:dist-pt-poly-2d mid-ml pl-verts) search-dist)
+                (progn
+                  (setq dx (- (car p2) (car p1)))
+                  (setq dy (- (cadr p2) (cadr p1)))
+                  (setq seg-len2 (distance p1 p2))
+                  (if (> seg-len2 1e-9)
+                    (setq perp-x (/ (- dy) seg-len2) perp-y (/ dx seg-len2))
+                    (setq perp-x 0.0 perp-y -1.0)
                   )
-                  (progn
-                    (vl-catch-all-apply
-                      '(lambda () (vla-put-TextOverride dim-obj " ")))
-                    (vl:add-mleader-simple
-                      mid-ml
-                      (list (+ (car mid-ml) (* perp-x txt-h 3.0))
-                            (+ (cadr mid-ml) (* perp-y txt-h 3.0))
-                            0.0)
-                      txt
-                      txt-h
-                      mleader-style-name
+
+                  ;; выбираем сторону (от полилинии)
+                  (setq near-pt (vl:nearest-pt-on-verts mid-ml pl-verts))
+                  (if near-pt
+                    (progn
+                      (setq to-near-x (- (car near-pt) (car mid-ml)))
+                      (setq to-near-y (- (cadr near-pt) (cadr mid-ml)))
+                      (setq side-dot (+ (* to-near-x perp-x) (* to-near-y perp-y)))
+                      (if (> side-dot 0.0)
+                        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
+                      )
+                    )
+                  )
+
+                  (setq dim-pt
+                    (list
+                      (+ (car mid-ml) (* perp-x off))
+                      (+ (cadr mid-ml) (* perp-y off))
+                      0.0
+                    )
+                  )
+
+                  (setq dim-obj
+                    (vla-AddDimAligned
+                      mspace
+                      (vlax-3d-point p1)
+                      (vlax-3d-point p2)
+                      (vlax-3d-point dim-pt)
+                    )
+                  )
+                  (if dim-obj
+                    (progn
+                      (if dim-style-name
+                        (vl-catch-all-apply
+                          '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
+                      )
+                      (if (>= len need-w)
+                        (vl-catch-all-apply
+                          '(lambda () (vla-put-TextOverride dim-obj txt)))
+                        (progn
+                          (vl-catch-all-apply
+                            '(lambda () (vla-put-TextOverride dim-obj " ")))
+                          (vl:add-mleader-simple
+                            mid-ml
+                            (list (+ (car mid-ml) (* perp-x txt-h 3.0))
+                                  (+ (cadr mid-ml) (* perp-y txt-h 3.0))
+                                  0.0)
+                            txt
+                            txt-h
+                            mleader-style-name
+                          )
+                        )
+                      )
                     )
                   )
                 )
               )
+              (setq i (1+ i))
             )
           )
         )
