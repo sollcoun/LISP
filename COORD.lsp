@@ -8152,7 +8152,7 @@
 ;;;
 ;;; Возвращает: entity name созданного MLEADER или nil
 ;;; ------------------------------------------------------------
-(defun vl:create-mleader (pt-arrow pt-land pt-text mtext-str style-name dogleg-len
+(defun vl:create-mleader (pt-arrow pt-land pt-text mtext-str style-name dogleg-len txt-h
                            / acadobj mspace mleader pts-variant old-cmleaderstyle)
   (vl-load-com)
   (setq acadobj (vlax-get-acad-object))
@@ -8200,6 +8200,12 @@
       )
       (vl-catch-all-apply
         '(lambda () (vla-put-TextString mleader mtext-str))
+      )
+      ;; --- ВАЖНО: принудительно задаём высоту текста ---
+      (if txt-h
+        (vl-catch-all-apply
+          '(lambda () (vla-put-TextHeight mleader (float txt-h)))
+        )
       )
       (vl-catch-all-apply
         '(lambda () (vla-put-TextAttachmentType mleader 1))
@@ -9204,6 +9210,7 @@
               length-str
               mleader-style-name
               (* txt-height 1.5)
+              txt-height
             )
           )
         )
@@ -9429,10 +9436,19 @@
       (vl-catch-all-apply '(lambda () (vla-put-StyleName ml style-name)))
       (vl-catch-all-apply '(lambda () (vla-put-TextString ml str)))
       (vl-catch-all-apply '(lambda () (vla-put-TextHeight ml txt-h)))
+      ;; --- маска фона ---
+      (vl-catch-all-apply
+        '(lambda ()
+           (vla-put-TextBackgroundFill ml :vlax-true)
+           (vla-put-TextBackgroundScaleFactor ml 1.05)
+           (vla-put-TextBackgroundColor ml 254)
+        )
+      )
       ml
     )
   )
 )
+
 
 ;;; --- Размеры всех М-линий рядом с полилинией ---
 (defun vl:dim-mlines-near-polyline
@@ -9718,7 +9734,7 @@
   )
 
   ;; --- Параметры оформления ---
-  (setq txt-height  1.0)
+  (setq txt-height  0.9)
   (setq land-length (* txt-height 1.5))
   (setq dim-offset    1.0)
   (setq dim-text-gap  0.5)
@@ -9834,7 +9850,7 @@
                 (setq pt-text (list (+ (car pt-land) land-length) (cadr pt-land) 0.0))
 
                 (if (= output-mode "Мультивыноска")
-                  (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length)
+                  (vl:create-mleader (list real-x real-y 0.0) pt-land pt-text coord-text actual-mleader-style land-length txt-height)
                   (vl:insert-coord-block
                     (list real-x real-y 0.0)
                     coord-block-name
@@ -9877,7 +9893,7 @@
                     (nth seg-idx vertices)
                     (nth (1+ seg-idx) vertices)
                     dim-offset
-                    1.0
+                    txt-height
                     actual-dim-style-name
                     actual-mleader-style
                     dim-text-gap
@@ -9894,10 +9910,10 @@
                               (car vertices)
                               5.0)))
                 (vl:create-parallel-dim-with-label
-                  (last vertices)
-                  (car vertices)
+                  (nth seg-idx vertices)
+                  (nth (1+ seg-idx) vertices)
                   dim-offset
-                  1.0
+                  txt-height
                   actual-dim-style-name
                   actual-mleader-style
                   dim-text-gap
