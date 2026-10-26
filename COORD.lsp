@@ -9445,16 +9445,32 @@
     nil
     (progn
       (vl-catch-all-apply '(lambda () (vla-put-StyleName ml style-name)))
-      (vl-catch-all-apply '(lambda () (vla-put-TextString ml str)))
+      
+      ;; точка на первой строке
+      (vl-catch-all-apply '(lambda () (vla-put-TextString ml (strcat "." "\\P" str))))
       (vl-catch-all-apply '(lambda () (vla-put-TextHeight ml txt-h)))
+      
       (vl-catch-all-apply '(lambda () (vla-put-EnableDogleg ml :vlax-true)))
-      (vl-catch-all-apply '(lambda () (vla-put-DoglegLength ml 0.5)))
       (vl-catch-all-apply '(lambda () (vla-put-ArrowheadType ml 20)))
-      ;; --- маска фона: каждое свойство отдельно, чтобы ошибка одного не блокировала остальные ---
+      
+      ;; горизонтальное + подчёркивание первой строки
+      (vl-catch-all-apply '(lambda () (vla-put-TextAttachmentDirection ml 0)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextLeftAttachmentType  ml 3)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextRightAttachmentType ml 3)))
+      (vl-catch-all-apply '(lambda () (vla-put-LandingGap ml 0.0)))
+      
+      ;; важно: отключаем автоматическое удлинение полки до текста
+      (vl-catch-all-apply '(lambda () (vla-put-ExtendLeaderToText ml :vlax-false)))
+      
+      ;; маска фона
       (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundFill ml :vlax-true)))
       (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundColor ml 254)))
       (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundScaleFactor ml 1.05)))
       (vl:set-mleader-mask-scale (vlax-vla-object->ename ml) 1.05)
+      
+      ;; ? САМОЕ ВАЖНОЕ: длину полки ставим в самом конце
+      (vl-catch-all-apply '(lambda () (vla-put-DoglegLength ml 0.5)))
+      
       ml
     )
   )
@@ -9632,7 +9648,7 @@
 
   (setq mleader-style-name "Координаты")
   (setq text-style-name    "Д-431")
-  (setq dim-style-name     "ISO-500 пустой COORD")
+  (setq dim-style-name     "длина трубы iso")
   (setq coord-block-name "XY")
 
   (setq block-scale 1.0)
