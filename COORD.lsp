@@ -9086,26 +9086,34 @@
 )
 
 ;;; ------------------------------------------------------------
+;;; Задаёт масштаб маски фона мультивыноски (DXF 141) —
+;;; маска только у текста. Должна быть определена ДО
+;;; vl:create-parallel-dim-with-label.
+;;; ------------------------------------------------------------
+(defun vl:set-mleader-mask-scale (ename scale / elst new)
+  (if ename
+    (progn
+      (setq elst (entget ename '("*")))
+      (if (assoc 141 elst)
+        (progn
+          (setq new (subst (cons 141 (float scale)) (assoc 141 elst) elst))
+          (vl-catch-all-apply 'entmod (list new))
+          (entupd ename)
+        )
+      )
+    )
+  )
+  ename
+)
+
+;;; ------------------------------------------------------------
 ;;; Создаёт параллельный (aligned) размер между двумя точками
-;;; с подписью — фактической длиной отрезка, отформатированной
-;;; через vl:fmt-length (а не "сырым" замером AutoCAD).
+;;; с подписью — фактической длиной отрезка (vl:fmt-length).
+;;; Длинный сегмент: подпись на размерной линии (<>).
+;;; Короткий сегмент: подпись выноской с маской фона 1.05
+;;; (маска только у текста).
 ;;;
-;;; Аргументы:
-;;;   pt1, pt2            — начальная и конечная точки отрезка
-;;;   dim-offset          — расстояние от отрезка до линии размера
-;;;   txt-scale           — высота текста размера
-;;;   dim-style-name      — имя размерного стиля (если существует —
-;;;                         назначается размеру; иначе используется
-;;;                         текущий стиль чертежа)
-;;;   mleader-style-name  — имя стиля мультивыноски (передаётся для
-;;;                         единообразия сигнатуры/логирования;
-;;;                         на сам размер не влияет, т.к. размер —
-;;;                         не MLEADER-объект)
-;;;   text-gap            — дополнительный отступ подписи от линии
-;;;                         размера (по перпендикуляру к отрезку)
-;;;
-;;; Возвращает: entity name созданного размера, либо nil, если
-;;; отрезок нулевой длины или размер создать не удалось.
+;;; Возвращает: entity name размера / мультивыноски, либо nil.
 ;;; ------------------------------------------------------------
 (defun vl:create-parallel-dim-with-label
        (pt1 pt2 offset-dist txt-height dim-style-name mleader-style-name dim-text-gap
@@ -9123,99 +9131,102 @@
   (setq dy (- (cadr pt2) (cadr pt1)))
   (setq seg-len (sqrt (+ (* dx dx) (* dy dy))))
 
-  ;; --- "Сырой" перпендикуляр к сегменту (пока без выбора стороны) ---
-  (if (> seg-len 1e-9)
-    (setq perp-x (/ (- dy) seg-len)
-          perp-y (/ dx seg-len))
-    (setq perp-x 0.0 perp-y -1.0)
-  )
-
-  (setq mid-pt
-    (list (/ (+ (car pt1) (car pt2)) 2.0)
-          (/ (+ (cadr pt1) (cadr pt2)) 2.0)
-          0.0)
-  )
-
-  ;; ------------------------------------------------------------
-  ;; Выбор стороны размера.
-  ;; Если рядом (в радиусе parallel-search-dist) есть другая
-  ;; выбранная полилиния — размер выносится НАРУЖУ, в сторону,
-  ;; противоположную от неё (чтобы у пары параллельных линий
-  ;; подписи оказались одна сверху, другая снизу и не наложились
-  ;; друг на друга). Если рядом ничего нет — старое поведение
-  ;; по умолчанию (перпендикуляр направлен "вниз", perp-y <= 0).
-  ;; ------------------------------------------------------------
-  (setq near-pt
-    (vl:nearest-pt-on-verts-list mid-pt other-verts-list parallel-search-dist)
-  )
-  (if near-pt
+  (if (< seg-len 1e-9)
+    nil
     (progn
-      (setq to-near-x (- (car near-pt) (car mid-pt)))
-      (setq to-near-y (- (cadr near-pt) (cadr mid-pt)))
-      (setq side-dot (+ (* to-near-x perp-x) (* to-near-y perp-y)))
-      (if (> side-dot 0.0)
-        (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
+      ;; --- Перпендикуляр к сегменту ---
+      (setq perp-x (/ (- dy) seg-len)
+            perp-y (/ dx seg-len))
+
+      (setq mid-pt
+        (list (/ (+ (car pt1) (car pt2)) 2.0)
+              (/ (+ (cadr pt1) (cadr pt2)) 2.0)
+              0.0)
       )
-    )
-    (if (> perp-y 0.0)
-      (progn (setq perp-x (- perp-x)) (setq perp-y (- perp-y)))
-    )
-  )
 
-  (setq dim-pt
-    (list
-      (+ (car mid-pt) (* perp-x offset-dist))
-      (+ (cadr mid-pt) (* perp-y offset-dist))
-      0.0
-    )
-  )
-
-  (setq dim-obj
-    (vla-AddDimAligned
-      mspace
-      (vlax-3d-point pt1)
-      (vlax-3d-point pt2)
-      (vlax-3d-point dim-pt)
-    )
-  )
-
-  (if (null dim-obj)
-    (progn
-      (princ "\n  ОШИБКА: не удалось создать параллельный размер.")
-      nil
-    )
-    (progn
-      (vl-catch-all-apply '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
-
-      ;; оценка ширины текста (для решения: на линии или выноска)
-      (setq length-str (vl:fmt-length seg-len))
-      (setq char-count (strlen length-str))
-      (setq required-width (* char-count txt-height 0.6))
-
-      (if (>= seg-len required-width)
-        ;; --- Длинный сегмент: <> = живое значение AutoCAD ---
+      ;; --- Выбор стороны размера ---
+      (setq near-pt
+        (vl:nearest-pt-on-verts-list mid-pt other-verts-list parallel-search-dist)
+      )
+      (if near-pt
         (progn
-          (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj "<>")))
-          (setq label-ename (vlax-vla-object->ename dim-obj))
-        )
-        ;; --- Короткий сегмент: вынос (текст статичный) ---
-        (progn
-          (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
-          (setq label-ename
-            (vl:create-mleader
-              mid-pt
-              (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
-              (list (+ (car mid-pt) (* txt-height 2.0))
-                    (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
-              length-str
-              mleader-style-name
-              (* txt-height 1.5)
-              txt-height
-            )
+          (setq to-near-x (- (car near-pt) (car mid-pt)))
+          (setq to-near-y (- (cadr near-pt) (cadr mid-pt)))
+          (setq side-dot (+ (* to-near-x perp-x) (* to-near-y perp-y)))
+          (if (> side-dot 0.0)
+            (setq perp-x (- perp-x)
+                  perp-y (- perp-y))
           )
         )
+        (if (> perp-y 0.0)
+          (setq perp-x (- perp-x)
+                perp-y (- perp-y))
+        )
       )
-      label-ename
+
+      (setq dim-pt
+        (list
+          (+ (car mid-pt)  (* perp-x offset-dist))
+          (+ (cadr mid-pt) (* perp-y offset-dist))
+          0.0
+        )
+      )
+
+      (setq dim-obj
+        (vl-catch-all-apply
+          'vla-AddDimAligned
+          (list mspace
+                (vlax-3d-point pt1)
+                (vlax-3d-point pt2)
+                (vlax-3d-point dim-pt))
+        )
+      )
+
+      (if (or (null dim-obj) (vl-catch-all-error-p dim-obj))
+        (progn
+          (princ "\n  ОШИБКА: не удалось создать параллельный размер.")
+          nil
+        )
+        (progn
+          (if dim-style-name
+            (vl-catch-all-apply '(lambda () (vla-put-StyleName dim-obj dim-style-name)))
+          )
+
+          ;; --- Оценка ширины текста ---
+          (setq length-str     (vl:fmt-length seg-len))
+          (setq char-count     (strlen length-str))
+          (setq required-width (* char-count txt-height 0.6))
+
+          (if (>= seg-len required-width)
+            ;; --- Длинный сегмент: <> = живое значение AutoCAD ---
+            (progn
+              (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj "<>")))
+              (setq label-ename (vlax-vla-object->ename dim-obj))
+            )
+            ;; --- Короткий сегмент: вынос (текст статичный) ---
+            (progn
+              (vl-catch-all-apply '(lambda () (vla-put-TextOverride dim-obj " ")))
+              (setq label-ename
+                (vl:create-mleader
+                  mid-pt
+                  (list (car mid-pt) (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
+                  (list (+ (car mid-pt) (* txt-height 2.0))
+                        (+ (cadr mid-pt) (* txt-height 2.0)) 0.0)
+                  length-str
+                  mleader-style-name
+                  0.5
+                  txt-height
+                )
+              )
+              ;; маска 1.05 — только у текста выноски
+              (if label-ename
+                (vl:set-mleader-mask-scale label-ename 1.05)
+              )
+            )
+          )
+          label-ename
+        )
+      )
     )
   )
 )
@@ -9436,14 +9447,14 @@
       (vl-catch-all-apply '(lambda () (vla-put-StyleName ml style-name)))
       (vl-catch-all-apply '(lambda () (vla-put-TextString ml str)))
       (vl-catch-all-apply '(lambda () (vla-put-TextHeight ml txt-h)))
-      ;; --- маска фона ---
-      (vl-catch-all-apply
-        '(lambda ()
-           (vla-put-TextBackgroundFill ml :vlax-true)
-           (vla-put-TextBackgroundScaleFactor ml 1.05)
-           (vla-put-TextBackgroundColor ml 254)
-        )
-      )
+      (vl-catch-all-apply '(lambda () (vla-put-EnableDogleg ml :vlax-true)))
+      (vl-catch-all-apply '(lambda () (vla-put-DoglegLength ml 0.5)))
+      (vl-catch-all-apply '(lambda () (vla-put-ArrowheadType ml 20)))
+      ;; --- маска фона: каждое свойство отдельно, чтобы ошибка одного не блокировала остальные ---
+      (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundFill ml :vlax-true)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundColor ml 254)))
+      (vl-catch-all-apply '(lambda () (vla-put-TextBackgroundScaleFactor ml 1.05)))
+      (vl:set-mleader-mask-scale (vlax-vla-object->ename ml) 1.05)
       ml
     )
   )
