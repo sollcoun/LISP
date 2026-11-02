@@ -742,42 +742,34 @@
 )
 
 ;;; ------------------------------------------------------------
-;;; —оздаЄт MTEXT с включЄнной маской фона и заданным текстовым
-;;; стилем.
-;;;
-;;; јргументы:
-;;;   ins-pt     Ч точка вставки текста
-;;;   txt-str    Ч строка текста
-;;;   height     Ч высота текста
-;;;   width      Ч ширина текстового пол€ (0 = авто)
-;;;   just       Ч выравнивание (AttachmentPoint)
-;;;   style-name Ч им€ текстового стил€
+;;; —оздаЄт слой, если его нет. ¬озвращает им€ сло€.
 ;;; ------------------------------------------------------------
-
-(defun vl:set-mtext-mask-scale (ename scale / elst)
-  (setq elst (entget ename '("*")))
-
-  (if (assoc 45 elst)
-    (setq elst
-          (subst
-            (cons 45 (float scale))
-            (assoc 45 elst)
-            elst))
-    (setq elst
-          (append elst
-                  (list (cons 45 (float scale)))))
+(defun vl:ensure-layer (layer-name aci-color / doc layers lay res)
+  (vl-load-com)
+  (setq doc    (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (setq layers (vla-get-Layers doc))
+  (setq res (vl-catch-all-apply 'vla-Item (list layers layer-name)))
+  (if (vl-catch-all-error-p res)
+    (progn
+      (setq lay (vla-Add layers layer-name))
+      (vl-catch-all-apply '(lambda () (vla-put-Color lay aci-color)))
+    )
   )
-
-  (entmod elst)
-  (entupd ename)
-  ename
+  layer-name
 )
 
+;;; ------------------------------------------------------------
+;;; —оздаЄт MTEXT с маской фона. Ќомера вершин: зелЄный цвет (3),
+;;; слой Ђвершины координатї.
+;;; ------------------------------------------------------------
 (defun vl:create-mtext-masked
        (ins-pt txt-str height width just style-name
-        / doc mspace mt en)
+        / doc mspace mt en vert-layer)
 
   (vl-load-com)
+
+  (setq vert-layer "вершины координат")
+  (vl:ensure-layer vert-layer 3)
 
   (setq doc    (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace doc))
@@ -802,6 +794,14 @@
 
       ;; ¬ыравнивание
       (vla-put-AttachmentPoint mt just)
+
+      ;; —лой и цвет (зелЄный = 3)
+      (vl-catch-all-apply
+        '(lambda ()
+           (vla-put-Layer mt vert-layer)))
+      (vl-catch-all-apply
+        '(lambda ()
+           (vla-put-Color mt 3)))
 
       ;; ћаска
       (vl-catch-all-apply
