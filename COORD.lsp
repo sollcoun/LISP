@@ -773,11 +773,35 @@
   ename
 )
 
+;;; ------------------------------------------------------------
+;;; Создаёт слой, если его нет. Возвращает имя слоя.
+;;; ------------------------------------------------------------
+(defun vl:ensure-layer (layer-name aci-color / doc layers lay res)
+  (vl-load-com)
+  (setq doc    (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (setq layers (vla-get-Layers doc))
+  (setq res (vl-catch-all-apply 'vla-Item (list layers layer-name)))
+  (if (vl-catch-all-error-p res)
+    (progn
+      (setq lay (vla-Add layers layer-name))
+      (vl-catch-all-apply '(lambda () (vla-put-Color lay aci-color)))
+    )
+  )
+  layer-name
+)
+
+;;; ------------------------------------------------------------
+;;; Создаёт MTEXT с маской фона. Номера вершин: зелёный цвет (3),
+;;; слой «вершины координат».
+;;; ------------------------------------------------------------
 (defun vl:create-mtext-masked
        (ins-pt txt-str height width just style-name
         / doc mspace mt en vert-layer)
 
   (vl-load-com)
+
+  (setq vert-layer "вершины координат")
+  (vl:ensure-layer vert-layer 3)
 
   (setq doc    (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace doc))
@@ -803,7 +827,15 @@
       ;; Выравнивание
       (vla-put-AttachmentPoint mt just)
 
-      ;; ?????
+      ;; Слой и цвет (зелёный = 3)
+      (vl-catch-all-apply
+        '(lambda ()
+           (vla-put-Layer mt vert-layer)))
+      (vl-catch-all-apply
+        '(lambda ()
+           (vla-put-Color mt 3)))
+
+      ;; Маска
       (vl-catch-all-apply
         '(lambda ()
            (vla-put-BackgroundFill mt :vlax-true)
