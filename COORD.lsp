@@ -2684,6 +2684,119 @@
   result
 )
 
+
+;;; ------------------------------------------------------------
+;;; Экранирование имени слоя для фильтра ssget
+;;; (запятая, *, ? и прочие служебные символы).
+;;; ------------------------------------------------------------
+(defun vl:ss-escape (s / i c out)
+  (setq out "" i 1)
+  (repeat (strlen s)
+    (setq c (substr s i 1))
+    (if (member c '("`" "," "#" "." "@" "*" "?" "~" "[" "]"))
+      (setq out (strcat out "`" c))
+      (setq out (strcat out c))
+    )
+    (setq i (1+ i))
+  )
+  out
+)
+
+;;; Все полилинии модели на том же слое, что и образец.
+(defun vl:similar-polys-on-layer (seed / ed lay ss)
+  (setq ed (entget seed))
+  (if (null ed)
+    nil
+    (progn
+      (setq lay (cdr (assoc 8 ed)))
+      (setq ss
+        (ssget "_X"
+          (list
+            '(0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE")
+            '(410 . "Model")
+            (cons 8 (vl:ss-escape lay))
+          )
+        )
+      )
+      (if (null ss)
+        (progn
+          (setq ss (ssadd))
+          (ssadd seed ss)
+        )
+        (if (not (ssmemb seed ss))
+          (ssadd seed ss)
+        )
+      )
+      ss
+    )
+  )
+)
+
+;;; Привязка: одна полилиния -> подобные на слое -> пользователь
+;;; снимает лишние (Shift) и Enter. Если уже выделено несколько
+;;; полилиний, берём их как есть.
+(defun vl:priv-pick-similar (/ ss seed ed lay n)
+  (setq ss (ssget "_I" '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
+  (cond
+    ((and ss (> (sslength ss) 1))
+     (princ (strcat "\n  Используется текущий выбор: " (itoa (sslength ss)) " полилиний."))
+     ss
+    )
+    (T
+     (if (and ss (= (sslength ss) 1))
+       (setq seed (ssname ss 0))
+       (progn
+         (princ "\n  Укажите одну полилинию — будут найдены подобные на том же слое.")
+         (setq seed (car (entsel "\nПолилиния: ")))
+       )
+     )
+     (if (or (null seed) (null (entget seed)))
+       nil
+       (progn
+         (setq ed (entget seed))
+         (if (not (member (cdr (assoc 0 ed)) '("LWPOLYLINE" "POLYLINE" "3DPOLYLINE")))
+           (progn
+             (princ "\n  Указанный объект не является полилинией.")
+             nil
+           )
+           (progn
+             (setq lay (cdr (assoc 8 ed)))
+             (setq ss (vl:similar-polys-on-layer seed))
+             (setq n (if ss (sslength ss) 0))
+             (princ
+               (strcat
+                 "\n  Слой «" lay "»: подобных полилиний — " (itoa n) "."
+               )
+             )
+             (if (<= n 1)
+               ss
+               (progn
+                 (princ "\n  Они выделены. Снимите лишние (Shift+клик) и нажмите Enter.")
+                 (setq *VL:SAVED-PICKADD* (getvar "PICKADD"))
+                 (setvar "PICKADD" 1)
+                 (sssetfirst nil nil)
+                 (command "_.SELECT" ss pause)
+                 (while (= (logand (getvar "CMDACTIVE") 1) 1)
+                   (command pause)
+                 )
+                 (setvar "PICKADD" *VL:SAVED-PICKADD*)
+                 (setq *VL:SAVED-PICKADD* nil)
+                 (sssetfirst nil nil)
+                 (setq ss (ssget "_P" '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
+                 (if ss
+                   (princ (strcat "\n  К обработке: " (itoa (sslength ss)) " полилиний."))
+                 )
+                 ss
+               )
+             )
+           )
+         )
+       )
+     )
+    )
+  )
+)
+
 (defun vl:coord-main (priv / last0 sel ename vertices pt-count idx pt
                           x-coord y-coord real-x real-y coord-text
                           label-w label-h vert-pos poly-closed
@@ -2731,6 +2844,10 @@
   (defun *error* (msg)
     (setvar "OSMODE"  old-osmode)
     (setvar "CMDECHO" old-cmdecho)
+    (if (and (boundp '*VL:SAVED-PICKADD*) (numberp *VL:SAVED-PICKADD*))
+      (setvar "PICKADD" *VL:SAVED-PICKADD*)
+    )
+    (setq *VL:SAVED-PICKADD* nil)
     (setq *error* old-error-handler)
     (if (not (wcmatch (strcase msg) "*CANCEL*,*EXIT*,*QUIT*"))
       (princ (strcat "\n  ОШИБКА: " msg))
@@ -2755,14 +2872,21 @@
     )
   )
 
-  ;; --- Выбор полилиний: сначала PICKFIRST (уже выделенные), иначе ssget ---
-  (setq ss (ssget "_I" '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
-  (if ss
-    (princ (strcat "\n  Используется текущий выбор: " (itoa (sslength ss)) " объект(ов)."))
+  ;; --- Выбор полилиний ---
+  ;; Привязка: клик по одной -> подобные на слое, лишние снимаются.
+  ;; COORD: прежний множественный выбор (или уже выделенные).
+  (if priv
+    (setq ss (vl:priv-pick-similar))
     (progn
-      (princ "\n  Выберите нужные полилинии (можно несколько).")
-      (princ "\n  Когда все нужные объекты выбраны — нажмите ENTER, чтобы завершить выбор.")
-      (setq ss (ssget '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
+      (setq ss (ssget "_I" '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
+      (if ss
+        (princ (strcat "\n  Используется текущий выбор: " (itoa (sslength ss)) " объект(ов)."))
+        (progn
+          (princ "\n  Выберите нужные полилинии (можно несколько).")
+          (princ "\n  Когда все нужные объекты выбраны — нажмите ENTER, чтобы завершить выбор.")
+          (setq ss (ssget '((0 . "LWPOLYLINE,POLYLINE,3DPOLYLINE"))))
+        )
+      )
     )
   )
 
