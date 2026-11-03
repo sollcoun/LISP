@@ -8,7 +8,7 @@
 (if (not (boundp '*VL:SETTINGS*)) (setq *VL:SETTINGS* nil))
 ;; *VL:SETTINGS* — assoc-список последних настроек COORD:
 ;;  number-mode, dim-mode, mline-prefix, output-mode, num-choice,
-;;  start-num, continue-mode, dim-style, mline-dim-style, do-export, export-fmt
+;;  start-num, continue-mode, dim-style, mline-dim-style, do-export, export-fmt, only-export
 (setq *VL:TEMPLATE-DIMSTYLES* (list "Standard" "Аннотативный" "Пикетаж" "Привязки" "Привязки+выноска" "По трассе" "По трассе+выноска" "длина трубы iso" "длина сети iso" "ISO-500 пустой COORD" "ISO-500 пустой" "По зданию" "ISO-500" "деталировки" "детал_ККС"))
 
 
@@ -2557,7 +2557,7 @@
                            / names i-dim i-mline dclpath f id res
                              number-mode dim-mode mline-prefix output-mode
                              num-choice start-num continue-mode
-                             do-export export-fmt
+                             do-export export-fmt only-export
                              has-continue cont-label
                              tile-num tile-dim tile-pref tile-out
                              tile-numch tile-start tile-cont
@@ -2577,6 +2577,7 @@
   (setq continue-mode (vl:settings-get 'continue-mode "Продолжить"))
   (setq do-export     (vl:settings-get 'do-export     "0"))
   (setq export-fmt    (vl:settings-get 'export-fmt    "Excel"))
+  (setq only-export   (vl:settings-get 'only-export   "0"))
 
   (if priv (setq number-mode "Нет" dim-mode "Да"))
 
@@ -2608,6 +2609,10 @@
   (write-line (if priv
                 "  label = \"ПРИВЯЗКА — настройки\";"
                 "  label = \"COORD — настройки\";") f)
+  (write-line "  spacer;" f)
+
+  ;; --- Только экспорт ---
+  (write-line "  : toggle { key = \"onlyexp\"; label = \"Только экспорт (без простановки номеров и размеров)\"; }" f)
   (write-line "  spacer;" f)
 
   ;; --- Номера / размеры ---
@@ -2692,6 +2697,7 @@
        )
      )
 
+     (set_tile "onlyexp" (if (= only-export "1") "1" "0"))
      (set_tile "exp" (if (= do-export "1") "1" "0"))
      (start_list "efmt")
      (mapcar 'add_list (list "Excel" "Word" "Оба"))
@@ -2724,6 +2730,7 @@
            " (setq i-mline (atoi (get_tile \"ds2\")))"
            " (setq i-mline i-dim)"
          )
+         " (setq only-export (get_tile \"onlyexp\"))"
          " (setq do-export (get_tile \"exp\"))"
          " (setq export-fmt (nth (atoi (get_tile \"efmt\")) (list \"Excel\" \"Word\" \"Оба\")))"
          " (done_dialog 1))"
@@ -2747,6 +2754,7 @@
          (vl:settings-put 'mline-dim-style (nth i-mline names))
          (vl:settings-put 'do-export     do-export)
          (vl:settings-put 'export-fmt    export-fmt)
+         (vl:settings-put 'only-export   only-export)
          (if priv
            (setq *VL:PRIV-DIM-CHOICE* (nth i-dim names))
            (setq *VL:DIM-CHOICE* (list (nth i-dim names) (nth i-mline names)))
@@ -2764,6 +2772,7 @@
              (cons 'mline-dim-style (nth i-mline names))
              (cons 'do-export     do-export)
              (cons 'export-fmt    export-fmt)
+             (cons 'only-export   only-export)
            )
          )
        )
@@ -2784,6 +2793,7 @@
          (cons 'mline-dim-style def-mline)
          (cons 'do-export     "0")
          (cons 'export-fmt    "Excel")
+         (cons 'only-export   "0")
        )
      )
     )
@@ -2924,7 +2934,7 @@
                           actual-mline-dim-style-name mline-dim-style-name dim-pick
                           existing-pts skipped
                           settings do-export export-fmt base-path
-                          continue-mode start-num)
+                          continue-mode start-num only-export)
 
 
   (vl-load-com)
@@ -3050,6 +3060,7 @@
   (setq continue-mode (cdr (assoc 'continue-mode settings)))
   (setq do-export     (cdr (assoc 'do-export settings)))
   (setq export-fmt    (cdr (assoc 'export-fmt settings)))
+  (setq only-export   (cdr (assoc 'only-export settings)))
   (setq dim-style-name       (cdr (assoc 'dim-style settings)))
   (setq mline-dim-style-name (cdr (assoc 'mline-dim-style settings)))
 
@@ -3060,6 +3071,20 @@
   (if (null num-choice) (setq num-choice "Авто"))
   (if (null do-export) (setq do-export "0"))
   (if (null export-fmt) (setq export-fmt "Excel"))
+  (if (null only-export) (setq only-export "0"))
+
+  ;; Если включён «Только экспорт» — отключаем простановку
+  (if (= only-export "1")
+    (progn
+      (setq number-mode "Нет")
+      (setq dim-mode    "Нет")
+      (setq do-export   "1")
+      ;; чистая таблица только по текущему выбору
+      (setq *VL:ALL-EXPORT-DATA* '())
+      (setq idx 1)
+      (princ "\n  Режим: ТОЛЬКО ЭКСПОРТ (номера и размеры не ставятся).")
+    )
+  )
 
   ;; --- Подготовка размерных стилей ---
   (if (= dim-mode "Да")
@@ -3170,7 +3195,7 @@
                 (setq already T)
               )
             )
-            ;; вершина уже размечена при прошлом запуске — пропускаем
+            ;; вершина уже размечена при прошлом запуске — пропускаем простановку
             (if (and (not already) (vl:pt-in-list-p pt existing-pts 0.01))
               (progn
                 (setq already T)
@@ -3178,19 +3203,21 @@
               )
             )
 
-            (if (not already)
+            ;; --- ВСЕГДА собираем координаты для экспорта ---
+            (setq real-x (car pt))
+            (setq real-y (cadr pt))
+            (setq x-coord real-y)
+            (setq y-coord real-x)
+
+            (setq *VL:ALL-EXPORT-DATA*
+              (append *VL:ALL-EXPORT-DATA*
+                (list (list idx (vl:fmt-coord x-coord) (vl:fmt-coord y-coord)))
+              )
+            )
+
+            ;; --- Простановка только если вершина новая и не режим «только экспорт» ---
+            (if (and (not already) (/= only-export "1"))
               (progn
-                (setq real-x (car pt))
-                (setq real-y (cadr pt))
-
-                (setq x-coord real-y)
-                (setq y-coord real-x)
-
-                (setq *VL:ALL-EXPORT-DATA*
-                  (append *VL:ALL-EXPORT-DATA*
-                    (list (list idx (vl:fmt-coord x-coord) (vl:fmt-coord y-coord)))
-                  )
-                )
                 (setq coord-text (strcat "X= " (vl:fmt-coord x-coord) "\\PY= " (vl:fmt-coord y-coord)))
 
                 (setq label-w (vl:estimate-text-width (strcat "X= " (vl:fmt-coord x-coord)) txt-height))
@@ -3213,15 +3240,17 @@
                     0.0
                   )
                 )
-                
+
                 (if (= number-mode "Да")
                   (vl:create-mtext-masked (list real-x real-y 0.0) (itoa idx) txt-height 0.0 1 text-style-name)
                 )
 
                 (setq processed-pts (cons pt processed-pts))
-                (setq idx (1+ idx))
               )
             )
+
+            ;; номер увеличиваем всегда — таблица экспорта со сплошной нумерацией
+            (setq idx (1+ idx))
             (setq vert-pos (1+ vert-pos))
           )
 
@@ -3411,4 +3440,3 @@
 
 (princ "\nCOORD.lsp загружен. Команды: COORD / CCL / КООРД / КОО.")
 (princ)
-
