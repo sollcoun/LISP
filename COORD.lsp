@@ -1357,31 +1357,143 @@
   (mapcar 'cadr lst)
 )
 
+
+;;; ------------------------------------------------------------
+;;; Сетка ячеек для подписей и сегментов.
+;;; Ключ ячейки — (ix . iy), в ячейке список объектов.
+;;; Проверка кандидата смотрит только соседние ячейки и
+;;; прекращается на первом пересечении.
+;;; ------------------------------------------------------------
+(if (not (boundp '*VL:GRID-CELL*)) (setq *VL:GRID-CELL* 30.0))
+(if (not (boundp '*VL:LABEL-GRID*)) (setq *VL:LABEL-GRID* nil))
+(if (not (boundp '*VL:SEG-GRID*)) (setq *VL:SEG-GRID* nil))
+(if (not (boundp '*VL:SEG-GRID-SRC*)) (setq *VL:SEG-GRID-SRC* nil))
+(if (not (boundp '*VL:SEG-GRID-CLOSED*)) (setq *VL:SEG-GRID-CLOSED* nil))
+(if (not (boundp '*VL:SEG-GRID-COUNT*)) (setq *VL:SEG-GRID-COUNT* nil))
+(if (not (boundp '*VL:ORIENT-SIGN*)) (setq *VL:ORIENT-SIGN* 1.0))
+
+(defun vl:reset-placement-index ()
+  (setq *VL:PLACED-BBOXES* '())
+  (setq *VL:LABEL-GRID* nil)
+  (setq *VL:SEG-GRID* nil)
+  (setq *VL:SEG-GRID-SRC* nil)
+  (setq *VL:SEG-GRID-CLOSED* nil)
+  (setq *VL:SEG-GRID-COUNT* nil)
+)
+
+(defun vl:grid-add (grid item minx miny maxx maxy cell / ix ix1 iy iy0 iy1 key old)
+  (setq ix  (fix (/ minx cell))
+        ix1 (fix (/ maxx cell))
+        iy0 (fix (/ miny cell))
+        iy1 (fix (/ maxy cell)))
+  (while (<= ix ix1)
+    (setq iy iy0)
+    (while (<= iy iy1)
+      (setq key (cons ix iy))
+      (setq old (assoc key grid))
+      (if old
+        (setq grid (subst (cons key (cons item (cdr old))) old grid))
+        (setq grid (cons (cons key (list item)) grid))
+      )
+      (setq iy (1+ iy))
+    )
+    (setq ix (1+ ix))
+  )
+  grid
+)
+
+(defun vl:grid-query (grid minx miny maxx maxy cell / ix ix1 iy iy0 iy1 row acc b)
+  (setq acc nil
+        ix  (fix (/ minx cell))
+        ix1 (fix (/ maxx cell))
+        iy0 (fix (/ miny cell))
+        iy1 (fix (/ maxy cell)))
+  (while (<= ix ix1)
+    (setq iy iy0)
+    (while (<= iy iy1)
+      (setq row (cdr (assoc (cons ix iy) grid)))
+      (foreach b row
+        (if (not (member b acc))
+          (setq acc (cons b acc))
+        )
+      )
+      (setq iy (1+ iy))
+    )
+    (setq ix (1+ ix))
+  )
+  acc
+)
+
+(defun vl:grid-add-bbox (grid bbox cell)
+  (vl:grid-add grid bbox (nth 0 bbox) (nth 1 bbox) (nth 2 bbox) (nth 3 bbox) cell)
+)
+
+(defun vl:grid-add-seg (grid rec cell / p1 p2 minx maxx miny maxy)
+  (setq p1 (cadr rec) p2 (caddr rec))
+  (setq minx (min (car p1) (car p2))
+        maxx (max (car p1) (car p2))
+        miny (min (cadr p1) (cadr p2))
+        maxy (max (cadr p1) (cadr p2)))
+  (vl:grid-add grid rec minx miny maxx maxy cell)
+)
+
+(defun vl:build-seg-grid (vertices seg-count closed cell / grid i rest p1 p2)
+  (setq grid nil i 0 rest vertices)
+  (repeat seg-count
+    (setq p1 (car rest)
+          p2 (cadr rest)
+          rest (cdr rest))
+    (if (and p1 p2)
+      (setq grid (vl:grid-add-seg grid (list i p1 p2 nil) cell))
+    )
+    (setq i (1+ i))
+  )
+  (if (and closed (car vertices) (nth seg-count vertices))
+    (setq grid
+      (vl:grid-add-seg grid
+        (list seg-count (nth seg-count vertices) (car vertices) T)
+        cell))
+  )
+  grid
+)
+
+(defun vl:ensure-seg-grid (vertices seg-count closed / )
+  (if (not (and (eq *VL:SEG-GRID-SRC* vertices)
+                (eq *VL:SEG-GRID-CLOSED* closed)
+                (= *VL:SEG-GRID-COUNT* seg-count)))
+    (progn
+      (setq *VL:SEG-GRID* (vl:build-seg-grid vertices seg-count closed *VL:GRID-CELL*))
+      (setq *VL:SEG-GRID-SRC* vertices)
+      (setq *VL:SEG-GRID-CLOSED* closed)
+      (setq *VL:SEG-GRID-COUNT* seg-count)
+      (setq *VL:ORIENT-SIGN* (vl:polygon-orientation-sign vertices seg-count closed))
+    )
+  )
+  *VL:SEG-GRID*
+)
+
 (defun vl:find-label-placement (vertex-pt label-w label-h vertices seg-count base-radius vertex-idx closed
                                  / angles radii found best-pt cand cbbox ok
-                                   seg-i p1 p2 outward-ang sorted-angles
+                                   outward-ang sorted-angles
                                    pad dogleg text-left text-right text-bot text-top
-                                   lead-ok)
+                                   rad ang ri rn ai an hits rec seg-i p1 p2 cell)
 
-  ;; ------------------------------------------------------------------
-  ;; Ищем точку приземления (land).
-  ;; Текст стилем ставится СПРАВА от land на длину dogleg.
-  ;; Поэтому проверяем именно область текста + небольшой зазор.
-  ;; Сильнее предпочитаем направление «наружу» и берём большие радиусы.
-  ;; ------------------------------------------------------------------
+  ;; Текст ставится справа от точки приземления на длину dogleg.
+  ;; Кандидаты идут от направления «наружу». Первый свободный — результат.
   (setq dogleg base-radius)
-  (setq pad    (* label-h 0.35))     ; заметный зазор между подписями
+  (setq pad (* label-h 0.35))
+  (setq cell *VL:GRID-CELL*)
+  (if (or (null cell) (<= cell 1e-6)) (setq cell 30.0))
 
-  (setq outward-ang (vl:outward-angle vertices seg-count vertex-idx closed
-                      (vl:polygon-orientation-sign vertices seg-count closed)))
+  (vl:ensure-seg-grid vertices seg-count closed)
+  (setq outward-ang
+    (vl:outward-angle vertices seg-count vertex-idx closed *VL:ORIENT-SIGN*))
   (if (null outward-ang) (setq outward-ang 0.0))
 
-  ;; Более частый набор углов
   (setq angles '(0 15 30 45 60 75 90 105 120 135 150 165 180
                  195 210 225 240 255 270 285 300 315 330 345))
   (setq sorted-angles (vl:sort-angles-by-target angles outward-ang))
 
-  ;; Начинаем с более дальних расстояний — меньше шансов наложиться
   (setq radii (list (* base-radius 3.0)
                     (* base-radius 5.0)
                     (* base-radius 7.5)
@@ -1390,92 +1502,87 @@
                     (* base-radius 22.0)
                     (* base-radius 30.0)))
 
-  (setq found nil)
+  (setq found nil
+        ri 0
+        rn (length radii)
+        an (length sorted-angles))
 
-  (foreach rad radii
-    (if (not found)
-      (foreach ang sorted-angles
-        (if (not found)
-          (progn
-            (setq cand (vl:candidate-point vertex-pt ang rad))
+  (while (and (not found) (< ri rn))
+    (setq rad (nth ri radii)
+          ai 0)
+    (while (and (not found) (< ai an))
+      (setq ang (nth ai sorted-angles))
+      (setq cand (vl:candidate-point vertex-pt ang rad))
 
-            ;; Область текста (dogleg вправо от land)
-            (setq text-left  (+ (car cand) dogleg))
-            (setq text-right (+ text-left label-w))
-            (setq text-bot   (- (cadr cand) (/ label-h 2.0)))
-            (setq text-top   (+ (cadr cand) (/ label-h 2.0)))
+      (setq text-left  (+ (car cand) dogleg))
+      (setq text-right (+ text-left label-w))
+      (setq text-bot   (- (cadr cand) (/ label-h 2.0)))
+      (setq text-top   (+ (cadr cand) (/ label-h 2.0)))
+      (setq cbbox (list (- text-left pad)
+                        (- text-bot pad)
+                        (+ text-right pad)
+                        (+ text-top pad)))
 
-            (setq cbbox (list (- text-left  pad)
-                              (- text-bot   pad)
-                              (+ text-right pad)
-                              (+ text-top   pad)))
+      (setq ok T)
 
-            (setq ok T)
+      ;; уже поставленные подписи — только ячейки этого бокса
+      (setq hits (vl:grid-query *VL:LABEL-GRID*
+                   (nth 0 cbbox) (nth 1 cbbox) (nth 2 cbbox) (nth 3 cbbox) cell))
+      (while (and ok hits)
+        (if (vl:bbox-overlap-p cbbox (car hits))
+          (setq ok nil)
+        )
+        (setq hits (cdr hits))
+      )
 
-            ;; 1. Не пересекаться с уже поставленными подписями
-            (foreach pb *VL:PLACED-BBOXES*
-              (if (and ok (vl:bbox-overlap-p cbbox pb)) (setq ok nil))
-            )
-
-            ;; 2. Не пересекаться с сегментами полилинии
-            (setq seg-i 0)
-            (repeat seg-count
-              (if ok
-                (progn
-                  (setq p1 (nth seg-i vertices))
-                  (setq p2 (nth (1+ seg-i) vertices))
-                  (if (or (= seg-i (1- vertex-idx)) (= seg-i vertex-idx))
-                    (if (vl:bbox-seg-intersect-line-only-p cbbox p1 p2) (setq ok nil))
-                    (if (vl:bbox-seg-intersect-p cbbox p1 p2) (setq ok nil))
-                  )
-                )
-              )
-              (setq seg-i (1+ seg-i))
-            )
-
-            ;; 3. Замыкающий сегмент
-            (if (and ok closed)
-              (progn
-                (setq p1 (nth seg-count vertices))
-                (setq p2 (car vertices))
-                (if (or (= vertex-idx 0) (= vertex-idx seg-count))
-                  (if (vl:bbox-seg-intersect-line-only-p cbbox p1 p2) (setq ok nil))
-                  (if (vl:bbox-seg-intersect-p cbbox p1 p2) (setq ok nil))
-                )
-              )
-            )
-
-            (if ok
-              (progn
-                (setq best-pt cand)
-                (setq found T)
-              )
-            )
-          )
+      ;; сегменты полилинии — только ячейки этого бокса
+      (if ok
+        (setq hits (vl:grid-query *VL:SEG-GRID*
+                     (nth 0 cbbox) (nth 1 cbbox) (nth 2 cbbox) (nth 3 cbbox) cell))
+      )
+      (while (and ok hits)
+        (setq rec (car hits)
+              hits (cdr hits)
+              seg-i (car rec)
+              p1 (cadr rec)
+              p2 (caddr rec))
+        (if (or (= seg-i (1- vertex-idx))
+                (= seg-i vertex-idx)
+                (and (cadddr rec)
+                     (or (= vertex-idx 0) (= vertex-idx seg-count))))
+          (if (vl:bbox-seg-intersect-line-only-p cbbox p1 p2) (setq ok nil))
+          (if (vl:bbox-seg-intersect-p cbbox p1 p2) (setq ok nil))
         )
       )
+
+      (if ok
+        (progn
+          (setq best-pt cand)
+          (setq found T)
+        )
+      )
+      (setq ai (1+ ai))
     )
+    (setq ri (1+ ri))
   )
 
-  ;; Fallback — далеко по направлению «наружу»
   (if (not found)
     (setq best-pt (vl:candidate-point vertex-pt
                     (if outward-ang outward-ang 0.0)
                     (* base-radius 25.0)))
   )
 
-  ;; Запоминаем bbox текста
   (setq text-left  (+ (car best-pt) dogleg))
   (setq text-right (+ text-left label-w))
   (setq text-bot   (- (cadr best-pt) (/ label-h 2.0)))
   (setq text-top   (+ (cadr best-pt) (/ label-h 2.0)))
+  (setq cbbox (list (- text-left pad)
+                    (- text-bot pad)
+                    (+ text-right pad)
+                    (+ text-top pad)))
 
-  (setq *VL:PLACED-BBOXES*
-    (cons (list (- text-left  pad)
-                (- text-bot   pad)
-                (+ text-right pad)
-                (+ text-top   pad))
-          *VL:PLACED-BBOXES*))
+  (setq *VL:PLACED-BBOXES* (cons cbbox *VL:PLACED-BBOXES*))
+  (setq *VL:LABEL-GRID* (vl:grid-add-bbox *VL:LABEL-GRID* cbbox cell))
 
   best-pt
 )
@@ -2822,7 +2929,7 @@
 
   (vl-load-com)
  
-  (setq *VL:PLACED-BBOXES* '())
+  (vl:reset-placement-index)
   (setq *VL:DIM-ON-LINE* priv)
 
   (setq mleader-style-name "Координаты")
@@ -3266,7 +3373,7 @@
   (setq *VL:LAST-VERTEX-NUM* nil)
   (setq *VL:ALL-EXPORT-DATA* '())
   (setq *VL:LAST-POLY-ENAME* nil)
-  (setq *VL:PLACED-BBOXES* '())
+  (vl:reset-placement-index)
   (setq *VL:COORD-MASTER-ENAME* nil)
   (setq *VL:COORD-MASTER-PT* nil)
   (princ "\nСброс, следующий вызов начнёт нумерацию точек как для первого запуска.")
@@ -3304,3 +3411,4 @@
 
 (princ "\nCOORD.lsp загружен. Команды: COORD / CCL / КООРД / КОО.")
 (princ)
+
